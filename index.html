@@ -50,7 +50,7 @@
             <span class="eyebrow">QUICK SEARCH</span>
             <h2>Find a train</h2>
           </div>
-          <span class="live-pill">DEMO DATA</span>
+          <span class="live-pill" id="dataStatus">FALLBACK DATA</span>
         </div>
         <form id="quickSearch">
           <label>From
@@ -78,8 +78,8 @@
     </section>
 
     <section class="section stats">
-      <div><strong id="trainCount">0</strong><span>Prototype trains</span></div>
-      <div><strong id="stationCount">0</strong><span>Prototype stations</span></div>
+      <div><strong id="trainCount">0</strong><span>Train records</span></div>
+      <div><strong id="stationCount">0</strong><span>Station records</span></div>
       <div><strong>24×7</strong><span>Future-ready architecture</span></div>
       <div><strong>v0.1</strong><span>Website prototype</span></div>
     </section>
@@ -89,13 +89,17 @@
         <div>
           <span class="eyebrow">RAILWAY DATABASE</span>
           <h2>Explore trains</h2>
-          <p>Search the prototype railway dataset by number, name, source or destination.</p>
+          <p>Load the public railway reference dataset, then search trains by number, name, source, destination and type.</p>
         </div>
         <a class="text-link" href="#planner">Open planner →</a>
       </div>
 
+      <div class="data-controls">
+        <button class="btn secondary" id="loadDataBtn" type="button">Load public railway data</button>
+        <div id="dataMessage" class="data-message info">Using the lightweight fallback records. Load the public reference dataset when you are ready.</div>
+      </div>
       <div class="toolbar">
-        <input id="trainSearch" class="search-input" placeholder="Search train number or name…">
+        <input id="trainSearch" class="search-input" placeholder="Search train number, name, source or destination…">
         <select id="typeFilter">
           <option value="all">All train types</option>
           <option value="Vande Bharat">Vande Bharat</option>
@@ -219,16 +223,14 @@
         data structures are prepared for later full-stack integration.
       </p>
       <div class="notice">
-        <strong>Prototype data notice:</strong> The trains and stations displayed
-        here are demonstration records. They are not presented as live Indian
-        Railways operational data.
+        <strong>Data notice:</strong> The public dataset is a historical/reference snapshot, not a live Indian Railways operational feed. Current schedules should be independently verified before use.
       </div>
     </section>
   </main>
 
   <footer>
     <div class="footer-brand">Rail-WAYS</div>
-    <p>AI-Based Railway Journey Optimization System • Website Prototype v0.1</p>
+    <p>AI-Based Railway Journey Optimization System • Website Prototype v0.2</p>
     <p class="footer-note">Demo interface — not a ticket booking service.</p>
   </footer>
 
