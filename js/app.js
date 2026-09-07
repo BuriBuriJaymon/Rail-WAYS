@@ -1,7 +1,7 @@
 const $ = id => document.getElementById(id);
 const esc = v => String(v ?? '').replace(/[&<>'"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
 const fmt = v => v == null || v === '' ? '—' : Number(v).toLocaleString('en-IN');
-const displayRuns = v => v || 'Not provided by source';
+const displayRuns = v => Array.isArray(v) ? (v.length ? v.join(' · ') : 'Not provided by source') : (v || 'Not provided by source');
 
 function stationName(code){ return stationByCode[code]?.name || code || '—'; }
 function setDate(){
@@ -16,10 +16,10 @@ function setMessage(text,type='info'){
 function stats(){
   $('trainCount').textContent=trains.length.toLocaleString('en-IN');
   $('stationCount').textContent=stations.length.toLocaleString('en-IN');
-  $('dataStatus').textContent=dataMode==='live'?'LAYER 1 DATA':'LOADING';
+  $('dataStatus').textContent=dataMode==='live'?'LAYER 1 DATA':dataMode.toUpperCase();
   if(dataMeta){
     $('scheduleCount').textContent=(dataMeta.scheduleTrainCount||0).toLocaleString('en-IN');
-    $('sourceLabel').textContent='DATAMEET / CC0';
+    $('sourceLabel').textContent='NEO2308 GTFS';
   }
 }
 
@@ -83,11 +83,11 @@ async function loadCurrentData(){
     ]);
     stationByCode=Object.fromEntries(stations.map(s=>[s.code,s]));
     dataMode='live'; stats(); renderTrains(); renderStations(); populatePlanner();
-    setMessage(`Loaded ${fmt(dataMeta.trainCount)} trains, ${fmt(dataMeta.stationCount)} stations and ${fmt(dataMeta.scheduleTrainCount)} train timetables. Source snapshot generated ${new Date(dataMeta.generatedAt).toLocaleString('en-IN')}.`,'success');
+    setMessage(`Loaded ${fmt(dataMeta.trainCount)} trains, ${fmt(dataMeta.stationCount)} stations and ${fmt(dataMeta.scheduleTrainCount)} timetables from the Neo2308 GTFS snapshot. Build: ${new Date(dataMeta.generatedAt).toLocaleString('en-IN')}.`,'success');
     b.textContent='Layer 1 data loaded ✓';
   }catch(e){
-    console.error(e); dataMode='fallback'; stats();
-    setMessage('Generated railway data is not available yet. Run the GitHub Actions deployment workflow; the interface will then load the full dataset automatically.','error');
+    console.error(e); dataMode='error'; stats();
+    setMessage('The railway database could not be loaded. The site will not show sample/fake train data. Check the latest GitHub Actions build and retry.','error');
     b.disabled=false; b.textContent='Retry loading data';
   }
 }
@@ -102,9 +102,17 @@ async function loadScheduleChunk(number){
 }
 async function trainRows(number){
   const chunk=await loadScheduleChunk(number);
-  return chunk?.[String(number)]||[];
+  const value=chunk?.[String(number)];
+  if(Array.isArray(value)) return value[0]?.rows || [];
+  return value || [];
 }
 
+async function trainVariants(number){
+  const chunk=await loadScheduleChunk(number);
+  const value=chunk?.[String(number)];
+  if(Array.isArray(value)) return value;
+  return value ? [{rows:value}] : [];
+}
 async function openTrain(number){
   const t=trains.find(x=>String(x.number)===String(number)); if(!t)return;
   $('modalContent').innerHTML=`<div class="loading-box"><span class="eyebrow">TRAIN TIMETABLE</span><h2>${esc(t.number)} — ${esc(t.name)}</h2><p>Loading the complete stop-by-stop route…</p></div>`;
@@ -114,10 +122,10 @@ async function openTrain(number){
     $('modalContent').innerHTML=`<span class="eyebrow">${esc(t.type||'TRAIN')}</span><h2>${esc(t.number)} — ${esc(t.name)}</h2><p>${esc(t.fromName||stationName(t.from))} → ${esc(t.toName||stationName(t.to))}</p>
       <div class="detail-grid">
         <div><b>Train number</b><span>${esc(t.number)}</span></div><div><b>Type</b><span>${esc(t.type||'—')}</span></div><div><b>Runs</b><span>${esc(displayRuns(t.runsDays))}</span></div>
-        <div><b>Distance</b><span>${fmt(t.distance)} km</span></div><div><b>Stops</b><span>${fmt(t.stopsCount)}</span></div><div><b>Classes</b><span>${esc((t.classes||[]).join(', ')||'Not provided')}</span></div>
+        <div><b>Distance</b><span>${fmt(t.distance)} km</span></div><div><b>Stops</b><span>${fmt(t.stopsCount)}</span></div><div><b>Classes</b><span>${esc((t.classes||[]).join(', ')||'Not provided')}</span></div><div><b>Schedule variants</b><span>${fmt(t.variantCount||1)}</span></div>
       </div>
       ${rows.length?`<h3>Complete timetable</h3><div class="table-wrap"><table class="timetable"><thead><tr><th>#</th><th>Station</th><th>Day</th><th>Arrival</th><th>Departure</th></tr></thead><tbody>${rows.map(s=>`<tr><td>${esc(s.seq)}</td><td><strong>${esc(s.code)}</strong><br>${esc(s.name)}</td><td>${esc(s.day??'—')}</td><td>${esc(s.arr||'—')}</td><td>${esc(s.dep||'—')}</td></tr>`).join('')}</tbody></table></div>`:'<div class="notice"><strong>No timetable rows found.</strong></div>'}
-      <p class="footer-note">${esc(SOURCE_INFO.note)}</p>`;
+      <p class="footer-note">${esc(SOURCE_INFO.note)} ${dataMeta?.sourceUrl?`Source: ${esc(dataMeta.sourceUrl)}`:''}</p>`;
   }catch(e){ $('modalContent').innerHTML='<div class="notice"><strong>Could not load timetable.</strong> Please try again.</div>'; }
 }
 function closeModal(){ $('trainModal').classList.remove('open'); $('trainModal').setAttribute('aria-hidden','true'); }
@@ -155,7 +163,7 @@ async function oneChange(from,to){
 }
 function renderRoutes(routes){
   const box=$('plannerResults');
-  if(!routes.length){ box.innerHTML='<div class="empty-state"><h3>No route found in this dataset</h3><p>Try another station pair. Timetable source coverage is historical and may not contain every current service.</p></div>'; return; }
+  if(!routes.length){ box.innerHTML='<div class="empty-state"><h3>No route found in this dataset</h3><p>Try another station pair. Results are limited to the trains present in the current Rail-WAYS timetable snapshot.</p></div>'; return; }
   box.innerHTML=`<div class="result-list">${routes.map((r,i)=>r.changes===0?`<article class="result-card"><div class="result-main"><strong>${esc(r.t.number)} — ${esc(r.t.name)}</strong><p>${esc(r.t.fromName||stationName(r.t.from))} → ${esc(r.t.toName||stationName(r.t.to))}</p></div><div class="result-meta"><span>Direct</span><span>${esc(r.rows[0]?.dep||'—')} → ${esc(r.rows.at(-1)?.arr||'—')}</span><span>${fmt(r.t.distance)} km</span></div><div class="result-score"><b>${i===0?'Best time in snapshot':'Direct'}</b><small>${esc(r.t.duration||'—')}</small></div></article>`:`<article class="result-card"><div class="result-main"><strong>${esc(r.first.number)} + ${esc(r.second.number)}</strong><p>${esc(r.first.fromName||stationName(r.first.from))} → ${esc(stationName(r.mid))} → ${esc(r.second.toName||stationName(r.second.to))}</p></div><div class="result-meta"><span>1 change</span><span>via ${esc(r.mid)}</span></div><div class="result-score"><b>Candidate</b><small>Connection timing requires deeper optimisation.</small></div></article>`).join('')}</div><p class="footer-note">Layer 1 searches timetable structure. It does not claim live availability, live delay, fares or booking information.</p>`;
 }
 async function findRoutes(from,to,maxChanges){
