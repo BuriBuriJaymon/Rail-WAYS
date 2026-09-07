@@ -1,47 +1,53 @@
-# Rail-WAYS Data Foundation v0.2
+# Rail-WAYS Layer 1 data schema
 
-## Entities
+## Station
 
-### Stations
-- `code`
-- `name`
-- `city`
-- `state`
-- `zone`
-- `address`
-- `latitude`
-- `longitude`
+```text
+code
+name
+city
+state
+zone
+address
+latitude
+longitude
+```
 
-### Trains
-- `number`
-- `name`
-- `type`
-- `from`
-- `to`
-- `fromName`
-- `toName`
-- `departure`
-- `arrival`
-- `duration`
-- `distance`
-- `zone`
-- `stopsCount`
+## Train
 
-### Train stops / schedules
-- `train_number`
-- `train_name`
-- `station_code`
-- `station_name`
-- `day`
-- `arrival`
-- `departure`
+```text
+number
+name
+type
+from
+fromName
+to
+toName
+departure
+arrival
+duration
+durationHours
+distance
+zone
+returnTrain
+classes
+runsDays
+stopsCount
+```
 
-## Intentionally excluded
+`runsDays` is intentionally nullable because the selected CC0 DataMeet source does not provide a reliable weekly running-days field.
 
-Coach count and coach composition are not part of the Rail-WAYS v0.2 data model.
+## Schedule row
 
-## Source strategy
+```text
+seq
+code
+name
+day
+arr
+dep
+halt
+distance
+```
 
-The prototype uses the public DataMeet Indian Railways dataset as a historical/reference snapshot and keeps the source URLs in `js/data.js`. The current official Government Open Data Platform also publishes railway station and timetable catalogs, but those catalogs are historical (the timetable catalog shows an update date of 24 January 2018). A future ingestion pipeline should therefore distinguish historical reference data from current timetable data.
-
-The full schedule file is loaded only when timetable detail is requested because it is substantially larger than the station/train files.
+The DataMeet schedule source supplies arrival/departure/day/station information. `halt` and per-stop distance remain null when the source does not supply them.
