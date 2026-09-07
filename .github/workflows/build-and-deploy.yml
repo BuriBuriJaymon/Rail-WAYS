@@ -4,6 +4,8 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+  schedule:
+    - cron: '30 2 * * *'
 
 permissions:
   contents: read
@@ -13,6 +15,9 @@ permissions:
 concurrency:
   group: pages
   cancel-in-progress: true
+
+env:
+  NEO_GTFS_URL: https://github.com/Neo2308/indianrailways-gtfs/raw/refs/heads/main/gtfs/gtfs.zip
 
 jobs:
   build-and-deploy:
@@ -30,7 +35,7 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Build Layer 1 railway database
+      - name: Build Layer 1 from Neo2308 GTFS
         run: python scripts/build_data.py
 
       - name: Assemble GitHub Pages site
