@@ -1,187 +1,1548 @@
-const $ = id => document.getElementById(id);
-const esc = v => String(v ?? '').replace(/[&<>'"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
-const fmt = v => v == null || v === '' ? '—' : Number(v).toLocaleString('en-IN');
-const displayRuns = v => Array.isArray(v) ? (v.length ? v.join(' · ') : 'Not provided by source') : (v || 'Not provided by source');
+const DATA_ROOT = new URL("generated_data/", document.baseURI).href;
 
-function stationName(code){ return stationByCode[code]?.name || code || '—'; }
-function setDate(){
-  const d = new Date();
-  const iso = new Date(d.getTime()-d.getTimezoneOffset()*60000).toISOString().slice(0,10);
-  $('dateInput').value = iso;
-  $('plannerDate').value = iso;
+let stations = [];
+let trains = [];
+let stationByCode = {};
+let stationTrains = {};
+let scheduleIndex = {};
+const scheduleCache = new Map();
+
+let dataMode = "loading";
+let dataMeta = null;
+
+const $ = (id) => document.getElementById(id);
+
+function escapeHTML(value) {
+  return String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#039;");
 }
-function setMessage(text,type='info'){
-  const el=$('dataMessage'); el.className=`data-message ${type}`; el.textContent=text;
+
+function normalize(value) {
+  return String(value ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, " ");
 }
-function stats(){
-  $('trainCount').textContent=trains.length.toLocaleString('en-IN');
-  $('stationCount').textContent=stations.length.toLocaleString('en-IN');
-  $('dataStatus').textContent=dataMode==='live'?'LAYER 1 DATA':dataMode.toUpperCase();
-  if(dataMeta){
-    $('scheduleCount').textContent=(dataMeta.scheduleTrainCount||0).toLocaleString('en-IN');
-    $('sourceLabel').textContent='NEO2308 GTFS';
+
+function loadJSON(path) {
+  const url = new URL(path, DATA_ROOT);
+
+  return fetch(url.href, {
+    cache: "no-store"
+  }).then((response) => {
+    if (!response.ok) {
+      throw new Error(`${response.status} ${response.statusText}: ${url.href}`);
+    }
+
+    return response.json();
+  });
+}
+
+function setDateDefaults() {
+  const today = new Date();
+  const iso = today.toISOString().slice(0, 10);
+
+  if ($("dateInput")) {
+    $("dateInput").value = iso;
+  }
+
+  if ($("plannerDate")) {
+    $("plannerDate").value = iso;
   }
 }
 
-function renderTrains(list=trains){
-  const box=$('trainResults');
-  if(!list.length){
-    box.innerHTML='<div class="empty-state"><h3>No trains found</h3><p>Try a train number, train name, source station, destination station or type.</p></div>';
+function setDataMessage(message, type = "info") {
+  const element = $("dataMessage");
+
+  if (!element) return;
+
+  element.className = `data-message ${type}`;
+  element.textContent = message;
+}
+
+function setDataStatus(text, type = "") {
+  const element = $("dataStatus");
+
+  if (!element) return;
+
+  element.textContent = text;
+
+  if (type) {
+    element.dataset.status = type;
+  }
+}
+
+function updateStats() {
+  if ($("trainCount")) {
+    $("trainCount").textContent = Number(
+      dataMeta?.trainCount ?? trains.length
+    ).toLocaleString();
+  }
+
+  if ($("stationCount")) {
+    $("stationCount").textContent = Number(
+      dataMeta?.stationCount ?? stations.length
+    ).toLocaleString();
+  }
+
+  if ($("scheduleCount")) {
+    $("scheduleCount").textContent = Number(
+      dataMeta?.scheduleTrainCount ?? Object.keys(scheduleIndex).length
+    ).toLocaleString();
+  }
+
+  if ($("sourceLabel")) {
+    $("sourceLabel").textContent = "Neo2308 GTFS";
+  }
+}
+
+
+/* =========================================================
+   STATION SEARCH / AUTOCOMPLETE
+   ========================================================= */
+
+function stationSearchText(station) {
+  return [
+    station.code,
+    station.name,
+    station.city,
+    station.state,
+    station.zone
+  ]
+    .filter(Boolean)
+    .join(" ");
+}
+
+function stationLabel(station) {
+  const code = station.code || "";
+  const name = station.name || "";
+
+  if (code && name) {
+    return `${code} — ${name}`;
+  }
+
+  return code || name || "Unknown station";
+}
+
+function scoreStation(station, query) {
+  const q = normalize(query);
+
+  if (!q) return 0;
+
+  const code = normalize(station.code);
+  const name = normalize(station.name);
+  const city = normalize(station.city);
+  const state = normalize(station.state);
+  const full = normalize(stationSearchText(station));
+
+  let score = 0;
+
+  if (code === q) score += 10000;
+  if (name === q) score += 9000;
+  if (city === q) score += 8000;
+
+  if (code.startsWith(q)) score += 6000;
+  if (name.startsWith(q)) score += 5000;
+  if (city.startsWith(q)) score += 4000;
+  if (state.startsWith(q)) score += 2500;
+
+  if (code.includes(q)) score += 3500;
+  if (name.includes(q)) score += 3000;
+  if (city.includes(q)) score += 2500;
+  if (full.includes(q)) score += 1000;
+
+  return score;
+}
+
+function findStation(query) {
+  const q = normalize(query);
+
+  if (!q) return null;
+
+  const exactCode = stations.find(
+    (station) => normalize(station.code) === q
+  );
+
+  if (exactCode) return exactCode;
+
+  const exactName = stations.find(
+    (station) => normalize(station.name) === q
+  );
+
+  if (exactName) return exactName;
+
+  const exactCity = stations.find(
+    (station) => normalize(station.city) === q
+  );
+
+  if (exactCity) return exactCity;
+
+  const ranked = stations
+    .map((station) => ({
+      station,
+      score: scoreStation(station, query)
+    }))
+    .filter((item) => item.score > 0)
+    .sort((a, b) => b.score - a.score);
+
+  return ranked.length ? ranked[0].station : null;
+}
+
+function getStationSuggestions(query, limit = 12) {
+  const q = normalize(query);
+
+  if (!q) {
+    return stations.slice(0, limit);
+  }
+
+  return stations
+    .map((station) => ({
+      station,
+      score: scoreStation(station, query)
+    }))
+    .filter((item) => item.score > 0)
+    .sort((a, b) => {
+      if (b.score !== a.score) {
+        return b.score - a.score;
+      }
+
+      return String(a.station.name).localeCompare(
+        String(b.station.name)
+      );
+    })
+    .slice(0, limit)
+    .map((item) => item.station);
+}
+
+function populateStationDatalists() {
+  const datalists = [
+    $("stationOptions"),
+    $("quickStationOptions")
+  ].filter(Boolean);
+
+  if (!datalists.length || !stations.length) return;
+
+  const fragment = document.createDocumentFragment();
+
+  stations.forEach((station) => {
+    const option = document.createElement("option");
+
+    option.value = station.code || station.name || "";
+
+    if (station.name) {
+      option.label = `${station.code || ""} — ${station.name}`;
+    }
+
+    fragment.appendChild(option);
+  });
+
+  datalists.forEach((datalist) => {
+    datalist.innerHTML = "";
+    datalist.appendChild(fragment.cloneNode(true));
+  });
+}
+
+
+/* =========================================================
+   CUSTOM AUTOCOMPLETE DROPDOWNS
+   ========================================================= */
+
+function createAutocomplete(input) {
+  if (!input || input.dataset.autocompleteReady === "true") {
     return;
   }
-  box.innerHTML=list.slice(0,60).map(t=>`<article class="train-card">
-    <div class="train-top"><div class="train-number">${esc(t.number)}</div><span class="train-type">${esc(t.type||'Train')}</span></div>
-    <div class="train-name">${esc(t.name||'Unnamed train')}</div>
-    <div class="route-row"><div class="route-point"><strong>${esc(t.departure||'—')}</strong><span>${esc(t.from||'—')}</span></div><div class="route-line"></div><div class="route-point"><strong>${esc(t.arrival||'—')}</strong><span>${esc(t.to||'—')}</span></div></div>
-    <div class="detail-strip"><span>${fmt(t.distance)} km</span><span>${fmt(t.stopsCount)} stops</span><span>${esc(displayRuns(t.runsDays))}</span></div>
-    <div class="card-footer"><span>${esc(t.fromName||stationName(t.from))} → ${esc(t.toName||stationName(t.to))}</span><button class="details-btn" data-train="${esc(t.number)}">View timetable →</button></div>
-  </article>`).join('');
+
+  input.dataset.autocompleteReady = "true";
+
+  const wrapper = document.createElement("div");
+  wrapper.className = "station-autocomplete-wrapper";
+
+  input.parentNode.insertBefore(wrapper, input);
+  wrapper.appendChild(input);
+
+  const dropdown = document.createElement("div");
+  dropdown.className = "station-autocomplete";
+  dropdown.hidden = true;
+
+  wrapper.appendChild(dropdown);
+
+  function closeDropdown() {
+    dropdown.hidden = true;
+    dropdown.innerHTML = "";
+  }
+
+  function renderSuggestions() {
+    const query = input.value.trim();
+
+    if (!query) {
+      closeDropdown();
+      return;
+    }
+
+    const matches = getStationSuggestions(query, 10);
+
+    dropdown.innerHTML = "";
+
+    if (!matches.length) {
+      dropdown.innerHTML = `
+        <div class="station-autocomplete-empty">
+          No matching station found
+        </div>
+      `;
+
+      dropdown.hidden = false;
+      return;
+    }
+
+    matches.forEach((station) => {
+      const item = document.createElement("button");
+
+      item.type = "button";
+      item.className = "station-autocomplete-item";
+
+      item.innerHTML = `
+        <strong>${escapeHTML(station.code || "")}</strong>
+        <span>${escapeHTML(station.name || "")}</span>
+      `;
+
+      if (station.city) {
+        item.innerHTML += `
+          <small>${escapeHTML(station.city)}</small>
+        `;
+      }
+
+      item.addEventListener("mousedown", (event) => {
+        event.preventDefault();
+
+        input.value = station.code || station.name || "";
+
+        input.dispatchEvent(
+          new Event("change", { bubbles: true })
+        );
+
+        closeDropdown();
+      });
+
+      dropdown.appendChild(item);
+    });
+
+    dropdown.hidden = false;
+  }
+
+  input.addEventListener("input", renderSuggestions);
+
+  input.addEventListener("focus", () => {
+    if (input.value.trim()) {
+      renderSuggestions();
+    }
+  });
+
+  input.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") {
+      closeDropdown();
+    }
+  });
+
+  document.addEventListener("click", (event) => {
+    if (!wrapper.contains(event.target)) {
+      closeDropdown();
+    }
+  });
 }
 
-function renderStations(list=stations){
-  const box=$('stationGrid');
-  if(!list.length){ box.innerHTML='<div class="empty-state"><h3>No station found</h3><p>Try another station name or code.</p></div>'; return; }
-  box.innerHTML=list.slice(0,80).map(s=>`<article class="station-card" data-station="${esc(s.code)}">
-    <div class="station-code">${esc(s.code)}</div><h3>${esc(s.name)}</h3>
-    <p>${esc([s.city,s.state].filter(Boolean).join(', ')||s.address||'')}</p>
-    <small>${s.zone?`Zone: ${esc(s.zone)}`:'Railway zone unavailable'}</small>
-    ${s.latitude!=null?`<small>${Number(s.latitude).toFixed(4)}, ${Number(s.longitude).toFixed(4)}</small>`:''}
-  </article>`).join('');
+function setupAutocomplete() {
+  [
+    $("originInput"),
+    $("destinationInput"),
+    $("fromInput"),
+    $("toInput")
+  ]
+    .filter(Boolean)
+    .forEach(createAutocomplete);
 }
 
-function populatePlanner(){
-  const options=stations.map(s=>`<option value="${esc(s.code)}">${esc(s.name)} (${esc(s.code)})</option>`).join('');
-  $('originSelect').innerHTML=options; $('destinationSelect').innerHTML=options;
-  if(stationByCode.NDLS) $('originSelect').value='NDLS';
-  if(stationByCode.PNBE) $('destinationSelect').value='PNBE';
+
+/* =========================================================
+   TRAIN SEARCH
+   ========================================================= */
+
+function trainMatchesSearch(train, query) {
+  const q = normalize(query);
+
+  if (!q) return true;
+
+  const values = [
+    train.number,
+    train.name,
+    train.type,
+    train.from,
+    train.fromName,
+    train.to,
+    train.toName
+  ];
+
+  return values.some((value) =>
+    normalize(value).includes(q)
+  );
 }
 
-function filterTrains(){
-  const q=$('trainSearch').value.trim().toLowerCase();
-  const type=$('typeFilter').value;
-  renderTrains(trains.filter(t=>{
-    const text=`${t.number} ${t.name} ${t.from} ${t.to} ${t.fromName} ${t.toName} ${t.type}`.toLowerCase();
-    return (!q||text.includes(q))&&(type==='all'||t.type.toLowerCase()===type.toLowerCase());
-  }));
-}
-function filterStations(){
-  const q=$('stationSearch').value.trim().toLowerCase();
-  renderStations(stations.filter(s=>!q||`${s.code} ${s.name} ${s.city} ${s.state} ${s.zone}`.toLowerCase().includes(q)));
+function trainMatchesType(train, type) {
+  if (!type || type === "all") {
+    return true;
+  }
+
+  const trainType = normalize(train.type);
+  const wanted = normalize(type);
+
+  return trainType.includes(wanted);
 }
 
-async function loadJSON(path){
-  const r=await fetch(`${DATA_ROOT}/${path}`,{cache:'no-store'});
-  if(!r.ok) throw new Error(`${path}: ${r.status}`);
-  return r.json();
+function formatDuration(train) {
+  if (train.duration) {
+    return train.duration;
+  }
+
+  if (typeof train.durationHours === "number") {
+    const totalMinutes = Math.round(train.durationHours * 60);
+    const hours = Math.floor(totalMinutes / 60);
+    const minutes = totalMinutes % 60;
+
+    return `${hours}h ${minutes}m`;
+  }
+
+  return "—";
 }
-async function loadCurrentData(){
-  const b=$('loadDataBtn'); b.disabled=true; b.textContent='Loading Layer 1 data…';
-  setMessage('Loading the browser-optimized railway database…','loading');
-  try{
-    [stations,trains,stationTrains,scheduleIndex,dataMeta]=await Promise.all([
-      loadJSON('stations.json'),loadJSON('trains.json'),loadJSON('station_trains.json'),loadJSON('schedule_index.json'),loadJSON('meta.json')
-    ]);
-    stationByCode=Object.fromEntries(stations.map(s=>[s.code,s]));
-    dataMode='live'; stats(); renderTrains(); renderStations(); populatePlanner();
-    setMessage(`Loaded ${fmt(dataMeta.trainCount)} trains, ${fmt(dataMeta.stationCount)} stations and ${fmt(dataMeta.scheduleTrainCount)} timetables from the Neo2308 GTFS snapshot. Build: ${new Date(dataMeta.generatedAt).toLocaleString('en-IN')}.`,'success');
-    b.textContent='Layer 1 data loaded ✓';
-  }catch(e){
-    console.error(e); dataMode='error'; stats();
-    setMessage('The railway database could not be loaded. The site will not show sample/fake train data. Check the latest GitHub Actions build and retry.','error');
-    b.disabled=false; b.textContent='Retry loading data';
+
+function renderTrains() {
+  const container = $("trainResults");
+
+  if (!container) return;
+
+  const query = $("trainSearch")?.value || "";
+  const type = $("typeFilter")?.value || "all";
+
+  const filtered = trains
+    .filter((train) => trainMatchesSearch(train, query))
+    .filter((train) => trainMatchesType(train, type));
+
+  if (!filtered.length) {
+    container.innerHTML = `
+      <div class="empty-state">
+        <span class="empty-icon">⌕</span>
+        <h3>No trains found</h3>
+        <p>Try a different train number, name, station code or train type.</p>
+      </div>
+    `;
+
+    return;
+  }
+
+  const visible = filtered.slice(0, 100);
+
+  container.innerHTML = visible
+    .map((train) => `
+      <article class="train-card">
+
+        <div class="train-card-top">
+          <div>
+            <span class="eyebrow">
+              ${escapeHTML(train.type || "TRAIN")}
+            </span>
+
+            <h3>
+              ${escapeHTML(train.name || "Unnamed train")}
+            </h3>
+
+            <strong>
+              ${escapeHTML(train.number || "—")}
+            </strong>
+          </div>
+
+          <button
+            class="btn secondary train-view-btn"
+            data-train-number="${escapeHTML(train.number || "")}"
+            type="button"
+          >
+            Timetable
+          </button>
+        </div>
+
+        <div class="train-route">
+
+          <div>
+            <small>FROM</small>
+            <strong>${escapeHTML(train.from || "—")}</strong>
+            <span>${escapeHTML(train.fromName || "—")}</span>
+          </div>
+
+          <div class="route-arrow">→</div>
+
+          <div>
+            <small>TO</small>
+            <strong>${escapeHTML(train.to || "—")}</strong>
+            <span>${escapeHTML(train.toName || "—")}</span>
+          </div>
+
+        </div>
+
+        <div class="train-meta">
+
+          <span>
+            <b>Duration</b>
+            ${escapeHTML(formatDuration(train))}
+          </span>
+
+          <span>
+            <b>Stops</b>
+            ${escapeHTML(train.stopsCount ?? "—")}
+          </span>
+
+          <span>
+            <b>Distance</b>
+            ${
+              train.distance != null
+                ? escapeHTML(`${train.distance} km`)
+                : "—"
+            }
+          </span>
+
+        </div>
+
+      </article>
+    `)
+    .join("");
+
+  container
+    .querySelectorAll(".train-view-btn")
+    .forEach((button) => {
+      button.addEventListener("click", () => {
+        openTrain(button.dataset.trainNumber);
+      });
+    });
+
+  if (filtered.length > visible.length) {
+    container.insertAdjacentHTML(
+      "beforeend",
+      `
+        <div class="data-message info">
+          Showing the first ${visible.length.toLocaleString()}
+          matching trains out of ${filtered.length.toLocaleString()}.
+          Refine your search to narrow the results.
+        </div>
+      `
+    );
   }
 }
 
-async function loadScheduleChunk(number){
-  const bucket=scheduleIndex[String(number)];
-  if(!bucket) return null;
-  if(scheduleCache.has(bucket)) return scheduleCache.get(bucket);
-  const promise=loadJSON(`schedule_chunks/${bucket}.json`);
-  scheduleCache.set(bucket,promise);
+
+/* =========================================================
+   STATION DIRECTORY
+   ========================================================= */
+
+function filterStations() {
+  const query = normalize($("stationSearch")?.value || "");
+
+  if (!query) {
+    return stations;
+  }
+
+  return stations
+    .map((station) => ({
+      station,
+      score: scoreStation(station, query)
+    }))
+    .filter((item) => item.score > 0)
+    .sort((a, b) => b.score - a.score)
+    .map((item) => item.station);
+}
+
+function renderStations() {
+  const container = $("stationGrid");
+
+  if (!container) return;
+
+  const filtered = filterStations();
+  const visible = filtered.slice(0, 100);
+
+  if (!visible.length) {
+    container.innerHTML = `
+      <div class="empty-state">
+        <span class="empty-icon">⌕</span>
+        <h3>No station found</h3>
+        <p>Try a station code, station name or city.</p>
+      </div>
+    `;
+
+    return;
+  }
+
+  container.innerHTML = visible
+    .map((station) => `
+      <article class="station-card">
+
+        <div class="station-code">
+          ${escapeHTML(station.code || "—")}
+        </div>
+
+        <h3>
+          ${escapeHTML(station.name || "Unnamed station")}
+        </h3>
+
+        ${
+          station.city
+            ? `<p>${escapeHTML(station.city)}</p>`
+            : ""
+        }
+
+        ${
+          station.state
+            ? `<span>${escapeHTML(station.state)}</span>`
+            : ""
+        }
+
+        ${
+          station.zone
+            ? `<small>Zone: ${escapeHTML(station.zone)}</small>`
+            : ""
+        }
+
+        ${
+          station.latitude != null &&
+          station.longitude != null
+            ? `
+              <small>
+                ${escapeHTML(station.latitude)},
+                ${escapeHTML(station.longitude)}
+              </small>
+            `
+            : ""
+        }
+
+      </article>
+    `)
+    .join("");
+
+  if (filtered.length > visible.length) {
+    container.insertAdjacentHTML(
+      "beforeend",
+      `
+        <div class="data-message info">
+          Showing ${visible.length.toLocaleString()}
+          of ${filtered.length.toLocaleString()} matching stations.
+        </div>
+      `
+    );
+  }
+}
+
+
+/* =========================================================
+   SCHEDULE DATA
+   ========================================================= */
+
+async function loadScheduleChunk(chunkName) {
+  if (scheduleCache.has(chunkName)) {
+    return scheduleCache.get(chunkName);
+  }
+
+  const promise = loadJSON(`schedule_chunks/${chunkName}.json`);
+
+  scheduleCache.set(chunkName, promise);
+
   return promise;
 }
-async function trainRows(number){
-  const chunk=await loadScheduleChunk(number);
-  const value=chunk?.[String(number)];
-  if(Array.isArray(value)) return value[0]?.rows || [];
-  return value || [];
+
+function scheduleReferenceForTrain(trainNumber) {
+  const value = scheduleIndex?.[trainNumber];
+
+  if (value == null) {
+    return null;
+  }
+
+  if (typeof value === "string") {
+    return {
+      chunk: value,
+      key: trainNumber
+    };
+  }
+
+  if (Array.isArray(value)) {
+    return {
+      chunk: value[0],
+      key: trainNumber
+    };
+  }
+
+  if (typeof value === "object") {
+    return {
+      chunk:
+        value.chunk ??
+        value.file ??
+        value.chunkFile ??
+        value.part ??
+        null,
+
+      key:
+        value.key ??
+        value.train ??
+        value.trainNumber ??
+        trainNumber
+    };
+  }
+
+  return null;
 }
 
-async function trainVariants(number){
-  const chunk=await loadScheduleChunk(number);
-  const value=chunk?.[String(number)];
-  if(Array.isArray(value)) return value;
-  return value ? [{rows:value}] : [];
+function trainRows(chunk, trainNumber) {
+  if (!chunk) return [];
+
+  let value = chunk[trainNumber];
+
+  if (value == null) {
+    value = chunk[String(trainNumber)];
+  }
+
+  if (value == null) {
+    return [];
+  }
+
+  if (Array.isArray(value)) {
+    if (
+      value.length &&
+      value[0] &&
+      Array.isArray(value[0].rows)
+    ) {
+      return value[0].rows;
+    }
+
+    return value.flatMap((variant) => {
+      if (variant && Array.isArray(variant.rows)) {
+        return variant.rows;
+      }
+
+      return Array.isArray(variant) ? variant : [];
+    });
+  }
+
+  if (value && Array.isArray(value.rows)) {
+    return value.rows;
+  }
+
+  return [];
 }
-async function openTrain(number){
-  const t=trains.find(x=>String(x.number)===String(number)); if(!t)return;
-  $('modalContent').innerHTML=`<div class="loading-box"><span class="eyebrow">TRAIN TIMETABLE</span><h2>${esc(t.number)} — ${esc(t.name)}</h2><p>Loading the complete stop-by-stop route…</p></div>`;
-  $('trainModal').classList.add('open'); $('trainModal').setAttribute('aria-hidden','false');
-  try{
-    const rows=await trainRows(t.number);
-    $('modalContent').innerHTML=`<span class="eyebrow">${esc(t.type||'TRAIN')}</span><h2>${esc(t.number)} — ${esc(t.name)}</h2><p>${esc(t.fromName||stationName(t.from))} → ${esc(t.toName||stationName(t.to))}</p>
-      <div class="detail-grid">
-        <div><b>Train number</b><span>${esc(t.number)}</span></div><div><b>Type</b><span>${esc(t.type||'—')}</span></div><div><b>Runs</b><span>${esc(displayRuns(t.runsDays))}</span></div>
-        <div><b>Distance</b><span>${fmt(t.distance)} km</span></div><div><b>Stops</b><span>${fmt(t.stopsCount)}</span></div><div><b>Classes</b><span>${esc((t.classes||[]).join(', ')||'Not provided')}</span></div><div><b>Schedule variants</b><span>${fmt(t.variantCount||1)}</span></div>
+
+async function getTrainSchedules(trainNumber) {
+  const key = String(trainNumber);
+
+  const reference = scheduleReferenceForTrain(key);
+
+  if (!reference || !reference.chunk) {
+    return [];
+  }
+
+  const chunk = await loadScheduleChunk(reference.chunk);
+
+  return trainRows(chunk, reference.key);
+}
+
+function stationOrder(row) {
+  return Number(
+    row.seq ??
+    row.sequence ??
+    row.stopSequence ??
+    0
+  );
+}
+
+function scheduleStationCode(row) {
+  return String(
+    row.code ??
+    row.stationCode ??
+    ""
+  ).toUpperCase();
+}
+
+function verifyRoute(rows, fromCode, toCode) {
+  if (!rows.length) return false;
+
+  const from = String(fromCode).toUpperCase();
+  const to = String(toCode).toUpperCase();
+
+  const ordered = [...rows].sort(
+    (a, b) => stationOrder(a) - stationOrder(b)
+  );
+
+  let originIndex = -1;
+  let destinationIndex = -1;
+
+  for (let i = 0; i < ordered.length; i++) {
+    const code = scheduleStationCode(ordered[i]);
+
+    if (code === from && originIndex === -1) {
+      originIndex = i;
+    }
+
+    if (code === to && originIndex !== -1) {
+      destinationIndex = i;
+      break;
+    }
+  }
+
+  return (
+    originIndex !== -1 &&
+    destinationIndex !== -1 &&
+    originIndex < destinationIndex
+  );
+}
+
+
+/* =========================================================
+   DIRECT TRAIN SEARCH
+   ========================================================= */
+
+async function directTrains(fromCode, toCode) {
+  const from = String(fromCode).toUpperCase();
+  const to = String(toCode).toUpperCase();
+
+  const fromList = stationTrains?.[from] || [];
+  const toList = stationTrains?.[to] || [];
+
+  const toSet = new Set(toList.map(String));
+
+  const candidates = fromList
+    .map(String)
+    .filter((number) => toSet.has(number));
+
+  const results = [];
+
+  for (const trainNumber of candidates) {
+    const train = trains.find(
+      (item) => String(item.number) === String(trainNumber)
+    );
+
+    if (!train) continue;
+
+    const schedules = await getTrainSchedules(trainNumber);
+
+    const variants = [];
+
+    if (schedules.length) {
+      const unique = [];
+
+      for (const schedule of schedules) {
+        if (!verifyRoute([schedule], from, to)) {
+          continue;
+        }
+
+        const exists = unique.some(
+          (item) =>
+            JSON.stringify(item) === JSON.stringify(schedule)
+        );
+
+        if (!exists) {
+          unique.push(schedule);
+        }
+      }
+
+      variants.push(...unique);
+    }
+
+    if (!schedules.length || variants.length) {
+      results.push({
+        train,
+        schedules: variants
+      });
+    }
+  }
+
+  return results;
+}
+
+
+/* =========================================================
+   PLANNER
+   ========================================================= */
+
+function resolvePlannerStation(inputId) {
+  const input = $(inputId);
+
+  if (!input) return null;
+
+  const station = findStation(input.value);
+
+  return station;
+}
+
+function renderPlannerResults(results, fromStation, toStation) {
+  const container = $("plannerResults");
+
+  if (!container) return;
+
+  if (!results.length) {
+    container.innerHTML = `
+      <div class="empty-state">
+        <span class="empty-icon">⌕</span>
+
+        <h3>No direct trains found</h3>
+
+        <p>
+          No train in the Layer 1 timetable was found that visits
+          ${escapeHTML(fromStation.name)}
+          before
+          ${escapeHTML(toStation.name)}.
+        </p>
       </div>
-      ${rows.length?`<h3>Complete timetable</h3><div class="table-wrap"><table class="timetable"><thead><tr><th>#</th><th>Station</th><th>Day</th><th>Arrival</th><th>Departure</th></tr></thead><tbody>${rows.map(s=>`<tr><td>${esc(s.seq)}</td><td><strong>${esc(s.code)}</strong><br>${esc(s.name)}</td><td>${esc(s.day??'—')}</td><td>${esc(s.arr||'—')}</td><td>${esc(s.dep||'—')}</td></tr>`).join('')}</tbody></table></div>`:'<div class="notice"><strong>No timetable rows found.</strong></div>'}
-      <p class="footer-note">${esc(SOURCE_INFO.note)} ${dataMeta?.sourceUrl?`Source: ${esc(dataMeta.sourceUrl)}`:''}</p>`;
-  }catch(e){ $('modalContent').innerHTML='<div class="notice"><strong>Could not load timetable.</strong> Please try again.</div>'; }
-}
-function closeModal(){ $('trainModal').classList.remove('open'); $('trainModal').setAttribute('aria-hidden','true'); }
+    `;
 
-function intersect(a,b){ const set=new Set(b||[]); return (a||[]).filter(x=>set.has(x)); }
-async function directTrains(from,to){
-  const candidates=intersect(stationTrains[from],stationTrains[to]);
-  const out=[];
-  const byNumber=Object.fromEntries(trains.map(t=>[String(t.number),t]));
-  for(const n of candidates){
-    const rows=await trainRows(n); const i=rows.findIndex(x=>x.code===from), j=rows.findIndex(x=>x.code===to);
-    if(i>=0&&j>i) out.push({t:byNumber[String(n)],rows:rows.slice(i,j+1),changes:0});
+    return;
   }
-  return out.filter(x=>x.t).sort((a,b)=>(Number(a.t.durationHours)||999)-(Number(b.t.durationHours)||999));
-}
-async function oneChange(from,to){
-  // Keep this intentionally conservative: identify likely interchange stations from the
-  // source graph, then verify actual order in both train timetables.
-  const candidates=[]; const fromTrains=stationTrains[from]||[]; const toTrains=new Set(stationTrains[to]||[]);
-  const byNumber=Object.fromEntries(trains.map(t=>[String(t.number),t]));
-  const candidateMids=new Map();
-  for(const code of Object.keys(stationTrains)){
-    if(code===from||code===to)continue;
-    const a=intersect(fromTrains,stationTrains[code]); const b=intersect(stationTrains[code],stationTrains[to]);
-    if(a.length&&b.length) candidateMids.set(code,[a[0],b[0]]);
-    if(candidateMids.size>=80)break;
-  }
-  for(const [mid,[a,b]] of candidateMids){
-    const [r1,r2]=await Promise.all([trainRows(a),trainRows(b)]);
-    const i=r1.findIndex(x=>x.code===from), k=r1.findIndex(x=>x.code===mid), m=r2.findIndex(x=>x.code===mid), j=r2.findIndex(x=>x.code===to);
-    if(i>=0&&k>i&&m>=0&&j>m) candidates.push({first:byNumber[String(a)],second:byNumber[String(b)],mid,changes:1});
-    if(candidates.length>=8)break;
-  }
-  return candidates.filter(x=>x.first&&x.second);
-}
-function renderRoutes(routes){
-  const box=$('plannerResults');
-  if(!routes.length){ box.innerHTML='<div class="empty-state"><h3>No route found in this dataset</h3><p>Try another station pair. Results are limited to the trains present in the current Rail-WAYS timetable snapshot.</p></div>'; return; }
-  box.innerHTML=`<div class="result-list">${routes.map((r,i)=>r.changes===0?`<article class="result-card"><div class="result-main"><strong>${esc(r.t.number)} — ${esc(r.t.name)}</strong><p>${esc(r.t.fromName||stationName(r.t.from))} → ${esc(r.t.toName||stationName(r.t.to))}</p></div><div class="result-meta"><span>Direct</span><span>${esc(r.rows[0]?.dep||'—')} → ${esc(r.rows.at(-1)?.arr||'—')}</span><span>${fmt(r.t.distance)} km</span></div><div class="result-score"><b>${i===0?'Best time in snapshot':'Direct'}</b><small>${esc(r.t.duration||'—')}</small></div></article>`:`<article class="result-card"><div class="result-main"><strong>${esc(r.first.number)} + ${esc(r.second.number)}</strong><p>${esc(r.first.fromName||stationName(r.first.from))} → ${esc(stationName(r.mid))} → ${esc(r.second.toName||stationName(r.second.to))}</p></div><div class="result-meta"><span>1 change</span><span>via ${esc(r.mid)}</span></div><div class="result-score"><b>Candidate</b><small>Connection timing requires deeper optimisation.</small></div></article>`).join('')}</div><p class="footer-note">Layer 1 searches timetable structure. It does not claim live availability, live delay, fares or booking information.</p>`;
-}
-async function findRoutes(from,to,maxChanges){
-  if(dataMode!=='live') return [];
-  const direct=await directTrains(from,to); let routes=direct;
-  if(maxChanges>0&&direct.length<8) routes=routes.concat(await oneChange(from,to));
-  return routes.slice(0,12);
+
+  container.innerHTML = `
+    <div class="planner-summary">
+      <strong>
+        ${results.length.toLocaleString()} direct train${results.length === 1 ? "" : "s"} found
+      </strong>
+
+      <span>
+        ${escapeHTML(fromStation.code)} →
+        ${escapeHTML(toStation.code)}
+      </span>
+    </div>
+
+    <div class="planner-train-list">
+
+      ${results
+        .map(({ train }) => `
+          <article class="planner-train">
+
+            <div>
+              <span class="eyebrow">
+                ${escapeHTML(train.type || "TRAIN")}
+              </span>
+
+              <h3>
+                ${escapeHTML(train.name || "Unnamed train")}
+              </h3>
+
+              <strong>
+                ${escapeHTML(train.number || "—")}
+              </strong>
+            </div>
+
+            <div class="planner-route">
+
+              <span>
+                <b>${escapeHTML(train.from || "")}</b>
+                ${escapeHTML(train.fromName || "")}
+              </span>
+
+              <span>→</span>
+
+              <span>
+                <b>${escapeHTML(train.to || "")}</b>
+                ${escapeHTML(train.toName || "")}
+              </span>
+
+            </div>
+
+            <div class="planner-actions">
+
+              <span>
+                ${escapeHTML(formatDuration(train))}
+              </span>
+
+              <button
+                type="button"
+                class="btn secondary train-view-btn"
+                data-train-number="${escapeHTML(train.number || "")}"
+              >
+                View timetable
+              </button>
+
+            </div>
+
+          </article>
+        `)
+        .join("")}
+
+    </div>
+  `;
+
+  container
+    .querySelectorAll(".train-view-btn")
+    .forEach((button) => {
+      button.addEventListener("click", () => {
+        openTrain(button.dataset.trainNumber);
+      });
+    });
 }
 
-$('loadDataBtn').addEventListener('click',loadCurrentData);
-$('trainSearch').addEventListener('input',filterTrains);
-$('typeFilter').addEventListener('change',filterTrains);
-$('stationSearch').addEventListener('input',filterStations);
-$('trainResults').addEventListener('click',e=>{const b=e.target.closest('[data-train]');if(b)openTrain(b.dataset.train);});
-document.querySelectorAll('[data-close]').forEach(e=>e.addEventListener('click',closeModal));
-document.addEventListener('keydown',e=>{if(e.key==='Escape')closeModal();});
-$('swapBtn').addEventListener('click',()=>{const a=$('fromInput').value;$('fromInput').value=$('toInput').value;$('toInput').value=a;});
-$('quickSearch').addEventListener('submit',e=>{e.preventDefault();const find=v=>{const q=v.trim().toLowerCase();return stations.find(s=>s.code.toLowerCase()===q||s.name.toLowerCase()===q)||stations.find(s=>s.name.toLowerCase().includes(q));};const a=find($('fromInput').value),b=find($('toInput').value);if(a&&b){$('originSelect').value=a.code;$('destinationSelect').value=b.code;$('planner').scrollIntoView({behavior:'smooth'});$('plannerForm').requestSubmit();}else{$('trainSearch').value=`${$('fromInput').value} ${$('toInput').value}`.trim();$('trains').scrollIntoView({behavior:'smooth'});filterTrains();}});
-$('plannerForm').addEventListener('submit',async e=>{e.preventDefault();$('plannerResults').innerHTML='<div class="loading-box"><h3>Searching the timetable graph…</h3><p>Checking trains serving both stations and verifying stop order.</p></div>';const routes=await findRoutes($('originSelect').value,$('destinationSelect').value,Number($('maxChanges').value));renderRoutes(routes);});
-$('menuBtn').addEventListener('click',()=>$('nav').classList.toggle('open'));
-setDate(); stats(); renderTrains(); renderStations(); populatePlanner(); loadCurrentData();
+async function runPlanner() {
+  const container = $("plannerResults");
+
+  const fromStation = resolvePlannerStation("originInput");
+  const toStation = resolvePlannerStation("destinationInput");
+
+  if (!fromStation || !toStation) {
+    if (container) {
+      container.innerHTML = `
+        <div class="empty-state">
+          <span class="empty-icon">!</span>
+
+          <h3>Select valid stations</h3>
+
+          <p>
+            Enter a station code or name and choose a matching station
+            from the suggestions.
+          </p>
+        </div>
+      `;
+    }
+
+    return;
+  }
+
+  if (
+    normalize(fromStation.code) ===
+    normalize(toStation.code)
+  ) {
+    if (container) {
+      container.innerHTML = `
+        <div class="empty-state">
+          <span class="empty-icon">!</span>
+
+          <h3>Choose different stations</h3>
+
+          <p>
+            Origin and destination cannot be the same station.
+          </p>
+        </div>
+      `;
+    }
+
+    return;
+  }
+
+  if (container) {
+    container.innerHTML = `
+      <div class="empty-state">
+        <span class="empty-icon">⌛</span>
+
+        <h3>Searching timetable database…</h3>
+
+        <p>
+          Checking trains between
+          ${escapeHTML(fromStation.code)}
+          and
+          ${escapeHTML(toStation.code)}.
+        </p>
+      </div>
+    `;
+  }
+
+  try {
+    const results = await directTrains(
+      fromStation.code,
+      toStation.code
+    );
+
+    renderPlannerResults(
+      results,
+      fromStation,
+      toStation
+    );
+  } catch (error) {
+    console.error("Planner search failed:", error);
+
+    if (container) {
+      container.innerHTML = `
+        <div class="empty-state">
+          <span class="empty-icon">!</span>
+
+          <h3>Search failed</h3>
+
+          <p>
+            The timetable could not be loaded. Please try again.
+          </p>
+        </div>
+      `;
+    }
+  }
+}
+
+
+/* =========================================================
+   TRAIN MODAL / TIMETABLE
+   ========================================================= */
+
+function formatTime(value) {
+  if (!value) return "—";
+
+  return String(value);
+}
+
+function renderScheduleRows(rows) {
+  const ordered = [...rows].sort(
+    (a, b) => stationOrder(a) - stationOrder(b)
+  );
+
+  return ordered
+    .map((row) => `
+      <tr>
+
+        <td>
+          ${escapeHTML(row.seq ?? row.sequence ?? "—")}
+        </td>
+
+        <td>
+          <strong>
+            ${escapeHTML(row.code ?? row.stationCode ?? "—")}
+          </strong>
+        </td>
+
+        <td>
+          ${escapeHTML(row.name ?? row.stationName ?? "—")}
+        </td>
+
+        <td>
+          ${escapeHTML(
+            row.day != null ? `Day ${row.day}` : "—"
+          )}
+        </td>
+
+        <td>
+          ${escapeHTML(
+            formatTime(row.arr ?? row.arrival)
+          )}
+        </td>
+
+        <td>
+          ${escapeHTML(
+            formatTime(row.dep ?? row.departure)
+          )}
+        </td>
+
+        <td>
+          ${escapeHTML(
+            row.halt != null ? row.halt : "—"
+          )}
+        </td>
+
+        <td>
+          ${
+            row.distance != null
+              ? escapeHTML(`${row.distance} km`)
+              : "—"
+          }
+        </td>
+
+      </tr>
+    `)
+    .join("");
+}
+
+async function openTrain(trainNumber) {
+  const train = trains.find(
+    (item) =>
+      String(item.number) === String(trainNumber)
+  );
+
+  if (!train) return;
+
+  const modal = $("trainModal");
+  const content = $("modalContent");
+
+  if (!modal || !content) return;
+
+  modal.setAttribute("aria-hidden", "false");
+  modal.classList.add("open");
+
+  content.innerHTML = `
+    <div class="empty-state">
+      <span class="empty-icon">⌛</span>
+      <h3>Loading timetable…</h3>
+      <p>
+        ${escapeHTML(train.number || "")}
+        — ${escapeHTML(train.name || "")}
+      </p>
+    </div>
+  `;
+
+  try {
+    const schedules = await getTrainSchedules(trainNumber);
+
+    let rows = [];
+
+    if (schedules.length) {
+      rows = schedules;
+    }
+
+    content.innerHTML = `
+      <div class="modal-heading">
+
+        <span class="eyebrow">
+          ${escapeHTML(train.type || "TRAIN")}
+        </span>
+
+        <h2>
+          ${escapeHTML(train.name || "Unnamed train")}
+        </h2>
+
+        <strong>
+          ${escapeHTML(train.number || "—")}
+        </strong>
+
+      </div>
+
+      <div class="train-route">
+
+        <div>
+          <small>FROM</small>
+          <strong>${escapeHTML(train.from || "—")}</strong>
+          <span>${escapeHTML(train.fromName || "—")}</span>
+        </div>
+
+        <div class="route-arrow">→</div>
+
+        <div>
+          <small>TO</small>
+          <strong>${escapeHTML(train.to || "—")}</strong>
+          <span>${escapeHTML(train.toName || "—")}</span>
+        </div>
+
+      </div>
+
+      <div class="train-meta">
+
+        <span>
+          <b>Duration</b>
+          ${escapeHTML(formatDuration(train))}
+        </span>
+
+        <span>
+          <b>Stops</b>
+          ${escapeHTML(train.stopsCount ?? "—")}
+        </span>
+
+        <span>
+          <b>Distance</b>
+          ${
+            train.distance != null
+              ? escapeHTML(`${train.distance} km`)
+              : "—"
+          }
+        </span>
+
+      </div>
+
+      ${
+        rows.length
+          ? `
+            <div class="timetable-wrapper">
+
+              <table class="timetable">
+
+                <thead>
+                  <tr>
+                    <th>#</th>
+                    <th>Code</th>
+                    <th>Station</th>
+                    <th>Day</th>
+                    <th>Arrival</th>
+                    <th>Departure</th>
+                    <th>Halt</th>
+                    <th>Distance</th>
+                  </tr>
+                </thead>
+
+                <tbody>
+                  ${renderScheduleRows(rows)}
+                </tbody>
+
+              </table>
+
+            </div>
+          `
+          : `
+            <div class="data-message info">
+              No timetable rows are available for this train in the
+              current upstream snapshot.
+            </div>
+          `
+      }
+    `;
+  } catch (error) {
+    console.error("Timetable loading failed:", error);
+
+    content.innerHTML = `
+      <div class="empty-state">
+        <span class="empty-icon">!</span>
+
+        <h3>Timetable unavailable</h3>
+
+        <p>
+          The train record exists, but its timetable could not be loaded.
+        </p>
+      </div>
+    `;
+  }
+}
+
+function closeModal() {
+  const modal = $("trainModal");
+
+  if (!modal) return;
+
+  modal.setAttribute("aria-hidden", "true");
+  modal.classList.remove("open");
+}
+
+
+/* =========================================================
+   QUICK SEARCH
+   ========================================================= */
+
+async function runQuickSearch() {
+  const from = findStation(
+    $("fromInput")?.value || ""
+  );
+
+  const to = findStation(
+    $("toInput")?.value || ""
+  );
+
+  if (!from || !to) {
+    window.location.hash = "#planner";
+
+    if ($("plannerResults")) {
+      $("plannerResults").innerHTML = `
+        <div class="empty-state">
+          <span class="empty-icon">!</span>
+
+          <h3>Select valid stations</h3>
+
+          <p>
+            Enter a station name or code and select a matching station.
+          </p>
+        </div>
+      `;
+    }
+
+    return;
+  }
+
+  $("originInput").value = from.code;
+  $("destinationInput").value = to.code;
+
+  window.location.hash = "#planner";
+
+  await runPlanner();
+}
+
+
+/* =========================================================
+   LOAD DATABASE
+   ========================================================= */
+
+async function loadCurrentData() {
+  dataMode = "loading";
+
+  setDataStatus("LOADING");
+
+  setDataMessage(
+    "Loading the Layer 1 railway database…",
+    "info"
+  );
+
+  try {
+    const [
+      stationData,
+      trainData,
+      stationTrainData,
+      scheduleData,
+      metaData
+    ] = await Promise.all([
+      loadJSON("stations.json"),
+      loadJSON("trains.json"),
+      loadJSON("station_trains.json"),
+      loadJSON("schedule_index.json"),
+      loadJSON("meta.json")
+    ]);
+
+    stations = Array.isArray(stationData)
+      ? stationData
+      : [];
+
+    trains = Array.isArray(trainData)
+      ? trainData
+      : [];
+
+    stationTrains = stationTrainData || {};
+    scheduleIndex = scheduleData || {};
+    dataMeta = metaData || {};
+
+    stationByCode = {};
+
+    stations.forEach((station) => {
+      if (station.code) {
+        stationByCode[
+          String(station.code).toUpperCase()
+        ] = station;
+      }
+    });
+
+    dataMode = "ready";
+
+    updateStats();
+
+    renderTrains();
+    renderStations();
+
+    populateStationDatalists();
+    setupAutocomplete();
+
+    setDataStatus("READY", "ready");
+
+    setDataMessage(
+      `${stations.length.toLocaleString()} stations • ${trains.length.toLocaleString()} trains loaded`,
+      "success"
+    );
+
+  } catch (error) {
+    console.error("Rail-WAYS data loading failed:", error);
+
+    dataMode = "error";
+
+    setDataStatus("ERROR", "error");
+
+    setDataMessage(
+      "The railway database could not be loaded. Check the GitHub Pages deployment and try again.",
+      "error"
+    );
+
+    if ($("trainResults")) {
+      $("trainResults").innerHTML = `
+        <div class="empty-state">
+          <span class="empty-icon">!</span>
+
+          <h3>Railway database unavailable</h3>
+
+          <p>
+            The Layer 1 data files could not be loaded.
+          </p>
+        </div>
+      `;
+    }
+
+    if ($("stationGrid")) {
+      $("stationGrid").innerHTML = `
+        <div class="empty-state">
+          <span class="empty-icon">!</span>
+
+          <h3>Station database unavailable</h3>
+
+          <p>
+            The Layer 1 station data could not be loaded.
+          </p>
+        </div>
+      `;
+    }
+  }
+}
+
+
+/* =========================================================
+   EVENT LISTENERS
+   ========================================================= */
+
+function setupEvents() {
+
+  $("trainSearch")?.addEventListener(
+    "input",
+    renderTrains
+  );
+
+  $("typeFilter")?.addEventListener(
+    "change",
+    renderTrains
+  );
+
+  $("stationSearch")?.addEventListener(
+    "input",
+    renderStations
+  );
+
+  $("loadDataBtn")?.addEventListener(
+    "click",
+    loadCurrentData
+  );
+
+  $("plannerForm")?.addEventListener(
+    "submit",
+    async (event) => {
+      event.preventDefault();
+      await runPlanner();
+    }
+  );
+
+  $("quickSearch")?.addEventListener(
+    "submit",
+    async (event) => {
+      event.preventDefault();
+      await runQuickSearch();
+    }
+  );
+
+  $("swapBtn")?.addEventListener(
+    "click",
+    () => {
+      const from = $("fromInput");
+      const to = $("toInput");
+
+      if (!from || !to) return;
+
+      const temp = from.value;
+
+      from.value = to.value;
+      to.value = temp;
+    }
+  );
+
+  document
+    .querySelectorAll("[data-close]")
+    .forEach((element) => {
+      element.addEventListener(
+        "click",
+        closeModal
+      );
+    });
+
+  document.addEventListener(
+    "keydown",
+    (event) => {
+      if (event.key === "Escape") {
+        closeModal();
+      }
+    }
+  );
+
+  $("menuBtn")?.addEventListener(
+    "click",
+    () => {
+      $("nav")?.classList.toggle("open");
+    }
+  );
+}
+
+
+/* =========================================================
+   INITIALIZATION
+   ========================================================= */
+
+setDateDefaults();
+setupEvents();
+loadCurrentData();
