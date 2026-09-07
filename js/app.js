@@ -1,4 +1,4 @@
-const DATA_ROOT = new URL("generated_data/", document.baseURI).href;
+const APP_DATA_ROOT = new URL("generated_data/", document.baseURI).href;
 
 let stations = [];
 let trains = [];
@@ -29,31 +29,52 @@ function normalize(value) {
 }
 
 function loadJSON(path) {
-  const url = new URL(path, DATA_ROOT);
+  const url = new URL(path, APP_DATA_ROOT);
 
   return fetch(url.href, {
     cache: "no-store"
   }).then((response) => {
     if (!response.ok) {
-      throw new Error(`${response.status} ${response.statusText}: ${url.href}`);
+      throw new Error(
+        `${response.status} ${response.statusText}: ${url.href}`
+      );
     }
 
     return response.json();
   });
 }
 
+
+/* =========================================================
+   DATE
+   ========================================================= */
+
+function getLocalDateISO() {
+  const now = new Date();
+
+  const year = now.getFullYear();
+  const month = String(now.getMonth() + 1).padStart(2, "0");
+  const day = String(now.getDate()).padStart(2, "0");
+
+  return `${year}-${month}-${day}`;
+}
+
 function setDateDefaults() {
-  const today = new Date();
-  const iso = today.toISOString().slice(0, 10);
+  const today = getLocalDateISO();
 
   if ($("dateInput")) {
-    $("dateInput").value = iso;
+    $("dateInput").value = today;
   }
 
   if ($("plannerDate")) {
-    $("plannerDate").value = iso;
+    $("plannerDate").value = today;
   }
 }
+
+
+/* =========================================================
+   STATUS / STATS
+   ========================================================= */
 
 function setDataMessage(message, type = "info") {
   const element = $("dataMessage");
@@ -91,7 +112,8 @@ function updateStats() {
 
   if ($("scheduleCount")) {
     $("scheduleCount").textContent = Number(
-      dataMeta?.scheduleTrainCount ?? Object.keys(scheduleIndex).length
+      dataMeta?.scheduleTrainCount ??
+      Object.keys(scheduleIndex).length
     ).toLocaleString();
   }
 
@@ -102,7 +124,7 @@ function updateStats() {
 
 
 /* =========================================================
-   STATION SEARCH / AUTOCOMPLETE
+   STATION SEARCH
    ========================================================= */
 
 function stationSearchText(station) {
@@ -196,7 +218,7 @@ function getStationSuggestions(query, limit = 12) {
   const q = normalize(query);
 
   if (!q) {
-    return stations.slice(0, limit);
+    return [];
   }
 
   return stations
@@ -210,45 +232,17 @@ function getStationSuggestions(query, limit = 12) {
         return b.score - a.score;
       }
 
-      return String(a.station.name).localeCompare(
-        String(b.station.name)
+      return String(a.station.name || "").localeCompare(
+        String(b.station.name || "")
       );
     })
     .slice(0, limit)
     .map((item) => item.station);
 }
 
-function populateStationDatalists() {
-  const datalists = [
-    $("stationOptions"),
-    $("quickStationOptions")
-  ].filter(Boolean);
-
-  if (!datalists.length || !stations.length) return;
-
-  const fragment = document.createDocumentFragment();
-
-  stations.forEach((station) => {
-    const option = document.createElement("option");
-
-    option.value = station.code || station.name || "";
-
-    if (station.name) {
-      option.label = `${station.code || ""} — ${station.name}`;
-    }
-
-    fragment.appendChild(option);
-  });
-
-  datalists.forEach((datalist) => {
-    datalist.innerHTML = "";
-    datalist.appendChild(fragment.cloneNode(true));
-  });
-}
-
 
 /* =========================================================
-   CUSTOM AUTOCOMPLETE DROPDOWNS
+   CUSTOM AUTOCOMPLETE
    ========================================================= */
 
 function createAutocomplete(input) {
@@ -270,6 +264,8 @@ function createAutocomplete(input) {
 
   wrapper.appendChild(dropdown);
 
+  let selectedStation = null;
+
   function closeDropdown() {
     dropdown.hidden = true;
     dropdown.innerHTML = "";
@@ -277,6 +273,8 @@ function createAutocomplete(input) {
 
   function renderSuggestions() {
     const query = input.value.trim();
+
+    selectedStation = null;
 
     if (!query) {
       closeDropdown();
@@ -307,21 +305,26 @@ function createAutocomplete(input) {
       item.innerHTML = `
         <strong>${escapeHTML(station.code || "")}</strong>
         <span>${escapeHTML(station.name || "")}</span>
+        ${
+          station.city
+            ? `<small>${escapeHTML(station.city)}</small>`
+            : ""
+        }
       `;
-
-      if (station.city) {
-        item.innerHTML += `
-          <small>${escapeHTML(station.city)}</small>
-        `;
-      }
 
       item.addEventListener("mousedown", (event) => {
         event.preventDefault();
 
-        input.value = station.code || station.name || "";
+        selectedStation = station;
+
+        input.value = stationLabel(station);
+
+        input.dataset.stationCode = station.code || "";
 
         input.dispatchEvent(
-          new Event("change", { bubbles: true })
+          new Event("change", {
+            bubbles: true
+          })
         );
 
         closeDropdown();
@@ -333,7 +336,11 @@ function createAutocomplete(input) {
     dropdown.hidden = false;
   }
 
-  input.addEventListener("input", renderSuggestions);
+  input.addEventListener("input", () => {
+    input.dataset.stationCode = "";
+    selectedStation = null;
+    renderSuggestions();
+  });
 
   input.addEventListener("focus", () => {
     if (input.value.trim()) {
@@ -344,6 +351,26 @@ function createAutocomplete(input) {
   input.addEventListener("keydown", (event) => {
     if (event.key === "Escape") {
       closeDropdown();
+    }
+
+    if (event.key === "Enter") {
+      const matches = getStationSuggestions(
+        input.value.trim(),
+        1
+      );
+
+      if (matches.length) {
+        event.preventDefault();
+
+        selectedStation = matches[0];
+
+        input.value = stationLabel(matches[0]);
+
+        input.dataset.stationCode =
+          matches[0].code || "";
+
+        closeDropdown();
+      }
     }
   });
 
@@ -395,10 +422,9 @@ function trainMatchesType(train, type) {
     return true;
   }
 
-  const trainType = normalize(train.type);
-  const wanted = normalize(type);
-
-  return trainType.includes(wanted);
+  return normalize(train.type).includes(
+    normalize(type)
+  );
 }
 
 function formatDuration(train) {
@@ -407,9 +433,14 @@ function formatDuration(train) {
   }
 
   if (typeof train.durationHours === "number") {
-    const totalMinutes = Math.round(train.durationHours * 60);
-    const hours = Math.floor(totalMinutes / 60);
-    const minutes = totalMinutes % 60;
+    const totalMinutes =
+      Math.round(train.durationHours * 60);
+
+    const hours =
+      Math.floor(totalMinutes / 60);
+
+    const minutes =
+      totalMinutes % 60;
 
     return `${hours}h ${minutes}m`;
   }
@@ -422,19 +453,29 @@ function renderTrains() {
 
   if (!container) return;
 
-  const query = $("trainSearch")?.value || "";
-  const type = $("typeFilter")?.value || "all";
+  const query =
+    $("trainSearch")?.value || "";
+
+  const type =
+    $("typeFilter")?.value || "all";
 
   const filtered = trains
-    .filter((train) => trainMatchesSearch(train, query))
-    .filter((train) => trainMatchesType(train, type));
+    .filter((train) =>
+      trainMatchesSearch(train, query)
+    )
+    .filter((train) =>
+      trainMatchesType(train, type)
+    );
 
   if (!filtered.length) {
     container.innerHTML = `
       <div class="empty-state">
         <span class="empty-icon">⌕</span>
         <h3>No trains found</h3>
-        <p>Try a different train number, name, station code or train type.</p>
+        <p>
+          Try a different train number, name,
+          station code or train type.
+        </p>
       </div>
     `;
 
@@ -448,43 +489,71 @@ function renderTrains() {
       <article class="train-card">
 
         <div class="train-card-top">
+
           <div>
+
             <span class="eyebrow">
-              ${escapeHTML(train.type || "TRAIN")}
+              ${escapeHTML(
+                train.type || "TRAIN"
+              )}
             </span>
 
             <h3>
-              ${escapeHTML(train.name || "Unnamed train")}
+              ${escapeHTML(
+                train.name || "Unnamed train"
+              )}
             </h3>
 
             <strong>
-              ${escapeHTML(train.number || "—")}
+              ${escapeHTML(
+                train.number || "—"
+              )}
             </strong>
+
           </div>
 
           <button
             class="btn secondary train-view-btn"
-            data-train-number="${escapeHTML(train.number || "")}"
+            data-train-number="${escapeHTML(
+              train.number || ""
+            )}"
             type="button"
           >
             Timetable
           </button>
+
         </div>
 
         <div class="train-route">
 
           <div>
             <small>FROM</small>
-            <strong>${escapeHTML(train.from || "—")}</strong>
-            <span>${escapeHTML(train.fromName || "—")}</span>
+            <strong>
+              ${escapeHTML(
+                train.from || "—"
+              )}
+            </strong>
+            <span>
+              ${escapeHTML(
+                train.fromName || "—"
+              )}
+            </span>
           </div>
 
           <div class="route-arrow">→</div>
 
           <div>
             <small>TO</small>
-            <strong>${escapeHTML(train.to || "—")}</strong>
-            <span>${escapeHTML(train.toName || "—")}</span>
+            <strong>
+              ${escapeHTML(
+                train.to || "—"
+              )}
+            </strong>
+            <span>
+              ${escapeHTML(
+                train.toName || "—"
+              )}
+            </span>
           </div>
 
         </div>
@@ -493,19 +562,25 @@ function renderTrains() {
 
           <span>
             <b>Duration</b>
-            ${escapeHTML(formatDuration(train))}
+            ${escapeHTML(
+              formatDuration(train)
+            )}
           </span>
 
           <span>
             <b>Stops</b>
-            ${escapeHTML(train.stopsCount ?? "—")}
+            ${escapeHTML(
+              train.stopsCount ?? "—"
+            )}
           </span>
 
           <span>
             <b>Distance</b>
             ${
               train.distance != null
-                ? escapeHTML(`${train.distance} km`)
+                ? escapeHTML(
+                    `${train.distance} km`
+                  )
                 : "—"
             }
           </span>
@@ -519,9 +594,14 @@ function renderTrains() {
   container
     .querySelectorAll(".train-view-btn")
     .forEach((button) => {
-      button.addEventListener("click", () => {
-        openTrain(button.dataset.trainNumber);
-      });
+      button.addEventListener(
+        "click",
+        () => {
+          openTrain(
+            button.dataset.trainNumber
+          );
+        }
+      );
     });
 
   if (filtered.length > visible.length) {
@@ -529,9 +609,10 @@ function renderTrains() {
       "beforeend",
       `
         <div class="data-message info">
-          Showing the first ${visible.length.toLocaleString()}
-          matching trains out of ${filtered.length.toLocaleString()}.
-          Refine your search to narrow the results.
+          Showing the first
+          ${visible.length.toLocaleString()}
+          matching trains out of
+          ${filtered.length.toLocaleString()}.
         </div>
       `
     );
@@ -544,7 +625,9 @@ function renderTrains() {
    ========================================================= */
 
 function filterStations() {
-  const query = normalize($("stationSearch")?.value || "");
+  const query = normalize(
+    $("stationSearch")?.value || ""
+  );
 
   if (!query) {
     return stations;
@@ -553,10 +636,15 @@ function filterStations() {
   return stations
     .map((station) => ({
       station,
-      score: scoreStation(station, query)
+      score: scoreStation(
+        station,
+        query
+      )
     }))
     .filter((item) => item.score > 0)
-    .sort((a, b) => b.score - a.score)
+    .sort((a, b) =>
+      b.score - a.score
+    )
     .map((item) => item.station);
 }
 
@@ -566,6 +654,7 @@ function renderStations() {
   if (!container) return;
 
   const filtered = filterStations();
+
   const visible = filtered.slice(0, 100);
 
   if (!visible.length) {
@@ -573,7 +662,9 @@ function renderStations() {
       <div class="empty-state">
         <span class="empty-icon">⌕</span>
         <h3>No station found</h3>
-        <p>Try a station code, station name or city.</p>
+        <p>
+          Try a station code, station name or city.
+        </p>
       </div>
     `;
 
@@ -585,28 +676,41 @@ function renderStations() {
       <article class="station-card">
 
         <div class="station-code">
-          ${escapeHTML(station.code || "—")}
+          ${escapeHTML(
+            station.code || "—"
+          )}
         </div>
 
         <h3>
-          ${escapeHTML(station.name || "Unnamed station")}
+          ${escapeHTML(
+            station.name ||
+            "Unnamed station"
+          )}
         </h3>
 
         ${
           station.city
-            ? `<p>${escapeHTML(station.city)}</p>`
+            ? `<p>${escapeHTML(
+                station.city
+              )}</p>`
             : ""
         }
 
         ${
           station.state
-            ? `<span>${escapeHTML(station.state)}</span>`
+            ? `<span>${escapeHTML(
+                station.state
+              )}</span>`
             : ""
         }
 
         ${
           station.zone
-            ? `<small>Zone: ${escapeHTML(station.zone)}</small>`
+            ? `<small>
+                Zone: ${escapeHTML(
+                  station.zone
+                )}
+              </small>`
             : ""
         }
 
@@ -615,8 +719,12 @@ function renderStations() {
           station.longitude != null
             ? `
               <small>
-                ${escapeHTML(station.latitude)},
-                ${escapeHTML(station.longitude)}
+                ${escapeHTML(
+                  station.latitude
+                )},
+                ${escapeHTML(
+                  station.longitude
+                )}
               </small>
             `
             : ""
@@ -631,8 +739,11 @@ function renderStations() {
       "beforeend",
       `
         <div class="data-message info">
-          Showing ${visible.length.toLocaleString()}
-          of ${filtered.length.toLocaleString()} matching stations.
+          Showing
+          ${visible.length.toLocaleString()}
+          of
+          ${filtered.length.toLocaleString()}
+          matching stations.
         </div>
       `
     );
@@ -644,20 +755,30 @@ function renderStations() {
    SCHEDULE DATA
    ========================================================= */
 
-async function loadScheduleChunk(chunkName) {
+async function loadScheduleChunk(
+  chunkName
+) {
   if (scheduleCache.has(chunkName)) {
     return scheduleCache.get(chunkName);
   }
 
-  const promise = loadJSON(`schedule_chunks/${chunkName}.json`);
+  const promise = loadJSON(
+    `schedule_chunks/${chunkName}.json`
+  );
 
-  scheduleCache.set(chunkName, promise);
+  scheduleCache.set(
+    chunkName,
+    promise
+  );
 
   return promise;
 }
 
-function scheduleReferenceForTrain(trainNumber) {
-  const value = scheduleIndex?.[trainNumber];
+function scheduleReferenceForTrain(
+  trainNumber
+) {
+  const value =
+    scheduleIndex?.[trainNumber];
 
   if (value == null) {
     return null;
@@ -697,13 +818,18 @@ function scheduleReferenceForTrain(trainNumber) {
   return null;
 }
 
-function trainRows(chunk, trainNumber) {
+function trainRows(
+  chunk,
+  trainNumber
+) {
   if (!chunk) return [];
 
-  let value = chunk[trainNumber];
+  let value =
+    chunk[trainNumber];
 
   if (value == null) {
-    value = chunk[String(trainNumber)];
+    value =
+      chunk[String(trainNumber)];
   }
 
   if (value == null) {
@@ -711,6 +837,7 @@ function trainRows(chunk, trainNumber) {
   }
 
   if (Array.isArray(value)) {
+
     if (
       value.length &&
       value[0] &&
@@ -719,34 +846,62 @@ function trainRows(chunk, trainNumber) {
       return value[0].rows;
     }
 
-    return value.flatMap((variant) => {
-      if (variant && Array.isArray(variant.rows)) {
-        return variant.rows;
-      }
+    return value.flatMap(
+      (variant) => {
 
-      return Array.isArray(variant) ? variant : [];
-    });
+        if (
+          variant &&
+          Array.isArray(
+            variant.rows
+          )
+        ) {
+          return variant.rows;
+        }
+
+        return Array.isArray(
+          variant
+        )
+          ? variant
+          : [];
+      }
+    );
   }
 
-  if (value && Array.isArray(value.rows)) {
+  if (
+    value &&
+    Array.isArray(value.rows)
+  ) {
     return value.rows;
   }
 
   return [];
 }
 
-async function getTrainSchedules(trainNumber) {
-  const key = String(trainNumber);
+async function getTrainSchedules(
+  trainNumber
+) {
+  const key =
+    String(trainNumber);
 
-  const reference = scheduleReferenceForTrain(key);
+  const reference =
+    scheduleReferenceForTrain(key);
 
-  if (!reference || !reference.chunk) {
+  if (
+    !reference ||
+    !reference.chunk
+  ) {
     return [];
   }
 
-  const chunk = await loadScheduleChunk(reference.chunk);
+  const chunk =
+    await loadScheduleChunk(
+      reference.chunk
+    );
 
-  return trainRows(chunk, reference.key);
+  return trainRows(
+    chunk,
+    reference.key
+  );
 }
 
 function stationOrder(row) {
@@ -766,27 +921,53 @@ function scheduleStationCode(row) {
   ).toUpperCase();
 }
 
-function verifyRoute(rows, fromCode, toCode) {
-  if (!rows.length) return false;
+function verifyRoute(
+  rows,
+  fromCode,
+  toCode
+) {
+  if (!rows.length) {
+    return false;
+  }
 
-  const from = String(fromCode).toUpperCase();
-  const to = String(toCode).toUpperCase();
+  const from =
+    String(fromCode).toUpperCase();
 
-  const ordered = [...rows].sort(
-    (a, b) => stationOrder(a) - stationOrder(b)
-  );
+  const to =
+    String(toCode).toUpperCase();
+
+  const ordered =
+    [...rows].sort(
+      (a, b) =>
+        stationOrder(a) -
+        stationOrder(b)
+    );
 
   let originIndex = -1;
   let destinationIndex = -1;
 
-  for (let i = 0; i < ordered.length; i++) {
-    const code = scheduleStationCode(ordered[i]);
+  for (
+    let i = 0;
+    i < ordered.length;
+    i++
+  ) {
 
-    if (code === from && originIndex === -1) {
+    const code =
+      scheduleStationCode(
+        ordered[i]
+      );
+
+    if (
+      code === from &&
+      originIndex === -1
+    ) {
       originIndex = i;
     }
 
-    if (code === to && originIndex !== -1) {
+    if (
+      code === to &&
+      originIndex !== -1
+    ) {
       destinationIndex = i;
       break;
     }
@@ -804,57 +985,80 @@ function verifyRoute(rows, fromCode, toCode) {
    DIRECT TRAIN SEARCH
    ========================================================= */
 
-async function directTrains(fromCode, toCode) {
-  const from = String(fromCode).toUpperCase();
-  const to = String(toCode).toUpperCase();
+async function directTrains(
+  fromCode,
+  toCode
+) {
+  const from =
+    String(fromCode).toUpperCase();
 
-  const fromList = stationTrains?.[from] || [];
-  const toList = stationTrains?.[to] || [];
+  const to =
+    String(toCode).toUpperCase();
 
-  const toSet = new Set(toList.map(String));
+  const fromList =
+    stationTrains?.[from] || [];
 
-  const candidates = fromList
-    .map(String)
-    .filter((number) => toSet.has(number));
+  const toList =
+    stationTrains?.[to] || [];
+
+  const toSet =
+    new Set(
+      toList.map(String)
+    );
+
+  const candidates =
+    fromList
+      .map(String)
+      .filter(
+        (number) =>
+          toSet.has(number)
+      );
 
   const results = [];
 
-  for (const trainNumber of candidates) {
-    const train = trains.find(
-      (item) => String(item.number) === String(trainNumber)
-    );
+  for (
+    const trainNumber
+    of candidates
+  ) {
+
+    const train =
+      trains.find(
+        (item) =>
+          String(item.number) ===
+          String(trainNumber)
+      );
 
     if (!train) continue;
 
-    const schedules = await getTrainSchedules(trainNumber);
+    const schedules =
+      await getTrainSchedules(
+        trainNumber
+      );
 
-    const variants = [];
+    let validSchedules = [];
 
     if (schedules.length) {
-      const unique = [];
-
-      for (const schedule of schedules) {
-        if (!verifyRoute([schedule], from, to)) {
-          continue;
-        }
-
-        const exists = unique.some(
-          (item) =>
-            JSON.stringify(item) === JSON.stringify(schedule)
+      validSchedules =
+        schedules.filter(
+          (schedule) =>
+            verifyRoute(
+              Array.isArray(schedule)
+                ? schedule
+                : [schedule],
+              from,
+              to
+            )
         );
-
-        if (!exists) {
-          unique.push(schedule);
-        }
-      }
-
-      variants.push(...unique);
     }
 
-    if (!schedules.length || variants.length) {
+    if (
+      !schedules.length ||
+      validSchedules.length
+    ) {
       results.push({
         train,
-        schedules: variants
+        schedules:
+          validSchedules
       });
     }
   }
@@ -867,34 +1071,59 @@ async function directTrains(fromCode, toCode) {
    PLANNER
    ========================================================= */
 
-function resolvePlannerStation(inputId) {
+function resolvePlannerStation(
+  inputId
+) {
   const input = $(inputId);
 
   if (!input) return null;
 
-  const station = findStation(input.value);
+  const code =
+    input.dataset.stationCode;
 
-  return station;
+  if (code) {
+    return (
+      stationByCode[
+        String(code).toUpperCase()
+      ] || null
+    );
+  }
+
+  return findStation(
+    input.value
+  );
 }
 
-function renderPlannerResults(results, fromStation, toStation) {
-  const container = $("plannerResults");
+function renderPlannerResults(
+  results,
+  fromStation,
+  toStation
+) {
+  const container =
+    $("plannerResults");
 
   if (!container) return;
 
   if (!results.length) {
     container.innerHTML = `
       <div class="empty-state">
+
         <span class="empty-icon">⌕</span>
 
         <h3>No direct trains found</h3>
 
         <p>
-          No train in the Layer 1 timetable was found that visits
-          ${escapeHTML(fromStation.name)}
+          No train in the Layer 1 timetable
+          was found that visits
+          ${escapeHTML(
+            fromStation.name
+          )}
           before
-          ${escapeHTML(toStation.name)}.
+          ${escapeHTML(
+            toStation.name
+          )}.
         </p>
+
       </div>
     `;
 
@@ -903,102 +1132,175 @@ function renderPlannerResults(results, fromStation, toStation) {
 
   container.innerHTML = `
     <div class="planner-summary">
+
       <strong>
-        ${results.length.toLocaleString()} direct train${results.length === 1 ? "" : "s"} found
+        ${results.length.toLocaleString()}
+        direct train${
+          results.length === 1
+            ? ""
+            : "s"
+        }
+        found
       </strong>
 
       <span>
-        ${escapeHTML(fromStation.code)} →
-        ${escapeHTML(toStation.code)}
+        ${escapeHTML(
+          fromStation.code
+        )}
+        →
+        ${escapeHTML(
+          toStation.code
+        )}
       </span>
+
     </div>
 
     <div class="planner-train-list">
 
       ${results
-        .map(({ train }) => `
-          <article class="planner-train">
+        .map(
+          ({ train }) => `
+            <article class="planner-train">
 
-            <div>
-              <span class="eyebrow">
-                ${escapeHTML(train.type || "TRAIN")}
-              </span>
+              <div>
 
-              <h3>
-                ${escapeHTML(train.name || "Unnamed train")}
-              </h3>
+                <span class="eyebrow">
+                  ${escapeHTML(
+                    train.type ||
+                    "TRAIN"
+                  )}
+                </span>
 
-              <strong>
-                ${escapeHTML(train.number || "—")}
-              </strong>
-            </div>
+                <h3>
+                  ${escapeHTML(
+                    train.name ||
+                    "Unnamed train"
+                  )}
+                </h3>
 
-            <div class="planner-route">
+                <strong>
+                  ${escapeHTML(
+                    train.number ||
+                    "—"
+                  )}
+                </strong>
 
-              <span>
-                <b>${escapeHTML(train.from || "")}</b>
-                ${escapeHTML(train.fromName || "")}
-              </span>
+              </div>
 
-              <span>→</span>
+              <div class="planner-route">
 
-              <span>
-                <b>${escapeHTML(train.to || "")}</b>
-                ${escapeHTML(train.toName || "")}
-              </span>
+                <span>
+                  <b>
+                    ${escapeHTML(
+                      train.from || ""
+                    )}
+                  </b>
 
-            </div>
+                  ${escapeHTML(
+                    train.fromName ||
+                    ""
+                  )}
+                </span>
 
-            <div class="planner-actions">
+                <span>→</span>
 
-              <span>
-                ${escapeHTML(formatDuration(train))}
-              </span>
+                <span>
+                  <b>
+                    ${escapeHTML(
+                      train.to || ""
+                    )}
+                  </b>
 
-              <button
-                type="button"
-                class="btn secondary train-view-btn"
-                data-train-number="${escapeHTML(train.number || "")}"
-              >
-                View timetable
-              </button>
+                  ${escapeHTML(
+                    train.toName ||
+                    ""
+                  )}
+                </span>
 
-            </div>
+              </div>
 
-          </article>
-        `)
+              <div class="planner-actions">
+
+                <span>
+                  ${escapeHTML(
+                    formatDuration(
+                      train
+                    )
+                  )}
+                </span>
+
+                <button
+                  type="button"
+                  class="btn secondary train-view-btn"
+                  data-train-number="${escapeHTML(
+                    train.number || ""
+                  )}"
+                >
+                  View timetable
+                </button>
+
+              </div>
+
+            </article>
+          `
+        )
         .join("")}
 
     </div>
   `;
 
   container
-    .querySelectorAll(".train-view-btn")
+    .querySelectorAll(
+      ".train-view-btn"
+    )
     .forEach((button) => {
-      button.addEventListener("click", () => {
-        openTrain(button.dataset.trainNumber);
-      });
+      button.addEventListener(
+        "click",
+        () => {
+          openTrain(
+            button.dataset
+              .trainNumber
+          );
+        }
+      );
     });
 }
 
 async function runPlanner() {
-  const container = $("plannerResults");
+  const container =
+    $("plannerResults");
 
-  const fromStation = resolvePlannerStation("originInput");
-  const toStation = resolvePlannerStation("destinationInput");
+  const fromStation =
+    resolvePlannerStation(
+      "originInput"
+    );
 
-  if (!fromStation || !toStation) {
+  const toStation =
+    resolvePlannerStation(
+      "destinationInput"
+    );
+
+  if (
+    !fromStation ||
+    !toStation
+  ) {
+
     if (container) {
       container.innerHTML = `
         <div class="empty-state">
+
           <span class="empty-icon">!</span>
 
-          <h3>Select valid stations</h3>
+          <h3>
+            Select valid stations
+          </h3>
 
           <p>
-            Enter a station code or name and choose a matching station
+            Enter a station name or code
+            and select a matching station
             from the suggestions.
           </p>
+
         </div>
       `;
     }
@@ -1007,19 +1309,29 @@ async function runPlanner() {
   }
 
   if (
-    normalize(fromStation.code) ===
-    normalize(toStation.code)
+    normalize(
+      fromStation.code
+    ) ===
+    normalize(
+      toStation.code
+    )
   ) {
+
     if (container) {
       container.innerHTML = `
         <div class="empty-state">
+
           <span class="empty-icon">!</span>
 
-          <h3>Choose different stations</h3>
+          <h3>
+            Choose different stations
+          </h3>
 
           <p>
-            Origin and destination cannot be the same station.
+            Origin and destination cannot
+            be the same station.
           </p>
+
         </div>
       `;
     }
@@ -1030,44 +1342,64 @@ async function runPlanner() {
   if (container) {
     container.innerHTML = `
       <div class="empty-state">
+
         <span class="empty-icon">⌛</span>
 
-        <h3>Searching timetable database…</h3>
+        <h3>
+          Searching timetable database…
+        </h3>
 
         <p>
           Checking trains between
-          ${escapeHTML(fromStation.code)}
+          ${escapeHTML(
+            fromStation.code
+          )}
           and
-          ${escapeHTML(toStation.code)}.
+          ${escapeHTML(
+            toStation.code
+          )}.
         </p>
+
       </div>
     `;
   }
 
   try {
-    const results = await directTrains(
-      fromStation.code,
-      toStation.code
-    );
+
+    const results =
+      await directTrains(
+        fromStation.code,
+        toStation.code
+      );
 
     renderPlannerResults(
       results,
       fromStation,
       toStation
     );
+
   } catch (error) {
-    console.error("Planner search failed:", error);
+
+    console.error(
+      "Planner search failed:",
+      error
+    );
 
     if (container) {
       container.innerHTML = `
         <div class="empty-state">
+
           <span class="empty-icon">!</span>
 
-          <h3>Search failed</h3>
+          <h3>
+            Search failed
+          </h3>
 
           <p>
-            The timetable could not be loaded. Please try again.
+            The timetable could not
+            be loaded. Please try again.
           </p>
+
         </div>
       `;
     }
@@ -1076,7 +1408,7 @@ async function runPlanner() {
 
 
 /* =========================================================
-   TRAIN MODAL / TIMETABLE
+   TIMETABLE MODAL
    ========================================================= */
 
 function formatTime(value) {
@@ -1086,114 +1418,185 @@ function formatTime(value) {
 }
 
 function renderScheduleRows(rows) {
-  const ordered = [...rows].sort(
-    (a, b) => stationOrder(a) - stationOrder(b)
-  );
+  const ordered =
+    [...rows].sort(
+      (a, b) =>
+        stationOrder(a) -
+        stationOrder(b)
+    );
 
   return ordered
-    .map((row) => `
-      <tr>
+    .map(
+      (row) => `
+        <tr>
 
-        <td>
-          ${escapeHTML(row.seq ?? row.sequence ?? "—")}
-        </td>
+          <td>
+            ${escapeHTML(
+              row.seq ??
+              row.sequence ??
+              "—"
+            )}
+          </td>
 
-        <td>
-          <strong>
-            ${escapeHTML(row.code ?? row.stationCode ?? "—")}
-          </strong>
-        </td>
+          <td>
+            <strong>
+              ${escapeHTML(
+                row.code ??
+                row.stationCode ??
+                "—"
+              )}
+            </strong>
+          </td>
 
-        <td>
-          ${escapeHTML(row.name ?? row.stationName ?? "—")}
-        </td>
+          <td>
+            ${escapeHTML(
+              row.name ??
+              row.stationName ??
+              "—"
+            )}
+          </td>
 
-        <td>
-          ${escapeHTML(
-            row.day != null ? `Day ${row.day}` : "—"
-          )}
-        </td>
+          <td>
+            ${escapeHTML(
+              row.day != null
+                ? `Day ${row.day}`
+                : "—"
+            )}
+          </td>
 
-        <td>
-          ${escapeHTML(
-            formatTime(row.arr ?? row.arrival)
-          )}
-        </td>
+          <td>
+            ${escapeHTML(
+              formatTime(
+                row.arr ??
+                row.arrival
+              )
+            )}
+          </td>
 
-        <td>
-          ${escapeHTML(
-            formatTime(row.dep ?? row.departure)
-          )}
-        </td>
+          <td>
+            ${escapeHTML(
+              formatTime(
+                row.dep ??
+                row.departure
+              )
+            )}
+          </td>
 
-        <td>
-          ${escapeHTML(
-            row.halt != null ? row.halt : "—"
-          )}
-        </td>
+          <td>
+            ${escapeHTML(
+              row.halt != null
+                ? row.halt
+                : "—"
+            )}
+          </td>
 
-        <td>
-          ${
-            row.distance != null
-              ? escapeHTML(`${row.distance} km`)
-              : "—"
-          }
-        </td>
+          <td>
+            ${
+              row.distance != null
+                ? escapeHTML(
+                    `${row.distance} km`
+                  )
+                : "—"
+            }
+          </td>
 
-      </tr>
-    `)
+        </tr>
+      `
+    )
     .join("");
 }
 
-async function openTrain(trainNumber) {
-  const train = trains.find(
-    (item) =>
-      String(item.number) === String(trainNumber)
-  );
+async function openTrain(
+  trainNumber
+) {
+  const train =
+    trains.find(
+      (item) =>
+        String(item.number) ===
+        String(trainNumber)
+    );
 
   if (!train) return;
 
-  const modal = $("trainModal");
-  const content = $("modalContent");
+  const modal =
+    $("trainModal");
 
-  if (!modal || !content) return;
+  const content =
+    $("modalContent");
 
-  modal.setAttribute("aria-hidden", "false");
+  if (
+    !modal ||
+    !content
+  ) {
+    return;
+  }
+
+  modal.setAttribute(
+    "aria-hidden",
+    "false"
+  );
+
   modal.classList.add("open");
 
   content.innerHTML = `
     <div class="empty-state">
+
       <span class="empty-icon">⌛</span>
-      <h3>Loading timetable…</h3>
+
+      <h3>
+        Loading timetable…
+      </h3>
+
       <p>
-        ${escapeHTML(train.number || "")}
-        — ${escapeHTML(train.name || "")}
+        ${escapeHTML(
+          train.number || ""
+        )}
+        —
+        ${escapeHTML(
+          train.name || ""
+        )}
       </p>
+
     </div>
   `;
 
   try {
-    const schedules = await getTrainSchedules(trainNumber);
 
-    let rows = [];
+    const schedules =
+      await getTrainSchedules(
+        trainNumber
+      );
 
-    if (schedules.length) {
-      rows = schedules;
-    }
+    const rows =
+      schedules.flatMap(
+        (schedule) =>
+          Array.isArray(schedule)
+            ? schedule
+            : []
+      );
 
     content.innerHTML = `
       <div class="modal-heading">
 
         <span class="eyebrow">
-          ${escapeHTML(train.type || "TRAIN")}
+          ${escapeHTML(
+            train.type ||
+            "TRAIN"
+          )}
         </span>
 
         <h2>
-          ${escapeHTML(train.name || "Unnamed train")}
+          ${escapeHTML(
+            train.name ||
+            "Unnamed train"
+          )}
         </h2>
 
         <strong>
-          ${escapeHTML(train.number || "—")}
+          ${escapeHTML(
+            train.number ||
+            "—"
+          )}
         </strong>
 
       </div>
@@ -1201,17 +1604,43 @@ async function openTrain(trainNumber) {
       <div class="train-route">
 
         <div>
+
           <small>FROM</small>
-          <strong>${escapeHTML(train.from || "—")}</strong>
-          <span>${escapeHTML(train.fromName || "—")}</span>
+
+          <strong>
+            ${escapeHTML(
+              train.from || "—"
+            )}
+          </strong>
+
+          <span>
+            ${escapeHTML(
+              train.fromName || "—"
+            )}
+          </span>
+
         </div>
 
-        <div class="route-arrow">→</div>
+        <div class="route-arrow">
+          →
+        </div>
 
         <div>
+
           <small>TO</small>
-          <strong>${escapeHTML(train.to || "—")}</strong>
-          <span>${escapeHTML(train.toName || "—")}</span>
+
+          <strong>
+            ${escapeHTML(
+              train.to || "—"
+            )}
+          </strong>
+
+          <span>
+            ${escapeHTML(
+              train.toName || "—"
+            )}
+          </span>
+
         </div>
 
       </div>
@@ -1220,19 +1649,25 @@ async function openTrain(trainNumber) {
 
         <span>
           <b>Duration</b>
-          ${escapeHTML(formatDuration(train))}
+          ${escapeHTML(
+            formatDuration(train)
+          )}
         </span>
 
         <span>
           <b>Stops</b>
-          ${escapeHTML(train.stopsCount ?? "—")}
+          ${escapeHTML(
+            train.stopsCount ?? "—"
+          )}
         </span>
 
         <span>
           <b>Distance</b>
           ${
             train.distance != null
-              ? escapeHTML(`${train.distance} km`)
+              ? escapeHTML(
+                  `${train.distance} km`
+                )
               : "—"
           }
         </span>
@@ -1247,6 +1682,7 @@ async function openTrain(trainNumber) {
               <table class="timetable">
 
                 <thead>
+
                   <tr>
                     <th>#</th>
                     <th>Code</th>
@@ -1257,10 +1693,13 @@ async function openTrain(trainNumber) {
                     <th>Halt</th>
                     <th>Distance</th>
                   </tr>
+
                 </thead>
 
                 <tbody>
-                  ${renderScheduleRows(rows)}
+                  ${renderScheduleRows(
+                    rows
+                  )}
                 </tbody>
 
               </table>
@@ -1269,36 +1708,54 @@ async function openTrain(trainNumber) {
           `
           : `
             <div class="data-message info">
-              No timetable rows are available for this train in the
-              current upstream snapshot.
+              No timetable rows are available
+              for this train in the current
+              upstream snapshot.
             </div>
           `
       }
     `;
+
   } catch (error) {
-    console.error("Timetable loading failed:", error);
+
+    console.error(
+      "Timetable loading failed:",
+      error
+    );
 
     content.innerHTML = `
       <div class="empty-state">
+
         <span class="empty-icon">!</span>
 
-        <h3>Timetable unavailable</h3>
+        <h3>
+          Timetable unavailable
+        </h3>
 
         <p>
-          The train record exists, but its timetable could not be loaded.
+          The train record exists, but its
+          timetable could not be loaded.
         </p>
+
       </div>
     `;
   }
 }
 
 function closeModal() {
-  const modal = $("trainModal");
+  const modal =
+    $("trainModal");
 
   if (!modal) return;
 
-  modal.setAttribute("aria-hidden", "true");
-  modal.classList.remove("open");
+  modal.setAttribute(
+    "aria-hidden",
+    "true"
+  );
+
+  modal.classList.remove(
+    "open"
+  );
 }
 
 
@@ -1307,27 +1764,36 @@ function closeModal() {
    ========================================================= */
 
 async function runQuickSearch() {
-  const from = findStation(
-    $("fromInput")?.value || ""
-  );
+  const from =
+    findStation(
+      $("fromInput")?.value || ""
+    );
 
-  const to = findStation(
-    $("toInput")?.value || ""
-  );
+  const to =
+    findStation(
+      $("toInput")?.value || ""
+    );
 
   if (!from || !to) {
-    window.location.hash = "#planner";
+
+    window.location.hash =
+      "#planner";
 
     if ($("plannerResults")) {
       $("plannerResults").innerHTML = `
         <div class="empty-state">
+
           <span class="empty-icon">!</span>
 
-          <h3>Select valid stations</h3>
+          <h3>
+            Select valid stations
+          </h3>
 
           <p>
-            Enter a station name or code and select a matching station.
+            Enter a station name or code
+            and select a matching station.
           </p>
+
         </div>
       `;
     }
@@ -1335,10 +1801,20 @@ async function runQuickSearch() {
     return;
   }
 
-  $("originInput").value = from.code;
-  $("destinationInput").value = to.code;
+  $("originInput").value =
+    stationLabel(from);
 
-  window.location.hash = "#planner";
+  $("destinationInput").value =
+    stationLabel(to);
+
+  $("originInput").dataset.stationCode =
+    from.code || "";
+
+  $("destinationInput").dataset.stationCode =
+    to.code || "";
+
+  window.location.hash =
+    "#planner";
 
   await runPlanner();
 }
@@ -1349,9 +1825,12 @@ async function runQuickSearch() {
    ========================================================= */
 
 async function loadCurrentData() {
+
   dataMode = "loading";
 
-  setDataStatus("LOADING");
+  setDataStatus(
+    "LOADING"
+  );
 
   setDataMessage(
     "Loading the Layer 1 railway database…",
@@ -1359,6 +1838,7 @@ async function loadCurrentData() {
   );
 
   try {
+
     const [
       stationData,
       trainData,
@@ -1366,46 +1846,80 @@ async function loadCurrentData() {
       scheduleData,
       metaData
     ] = await Promise.all([
-      loadJSON("stations.json"),
-      loadJSON("trains.json"),
-      loadJSON("station_trains.json"),
-      loadJSON("schedule_index.json"),
-      loadJSON("meta.json")
+
+      loadJSON(
+        "stations.json"
+      ),
+
+      loadJSON(
+        "trains.json"
+      ),
+
+      loadJSON(
+        "station_trains.json"
+      ),
+
+      loadJSON(
+        "schedule_index.json"
+      ),
+
+      loadJSON(
+        "meta.json"
+      )
+
     ]);
 
-    stations = Array.isArray(stationData)
-      ? stationData
-      : [];
+    stations =
+      Array.isArray(stationData)
+        ? stationData
+        : [];
 
-    trains = Array.isArray(trainData)
-      ? trainData
-      : [];
+    trains =
+      Array.isArray(trainData)
+        ? trainData
+        : [];
 
-    stationTrains = stationTrainData || {};
-    scheduleIndex = scheduleData || {};
-    dataMeta = metaData || {};
+    stationTrains =
+      stationTrainData || {};
+
+    scheduleIndex =
+      scheduleData || {};
+
+    dataMeta =
+      metaData || {};
 
     stationByCode = {};
 
-    stations.forEach((station) => {
-      if (station.code) {
-        stationByCode[
-          String(station.code).toUpperCase()
-        ] = station;
+    stations.forEach(
+      (station) => {
+
+        if (station.code) {
+
+          stationByCode[
+            String(
+              station.code
+            ).toUpperCase()
+          ] = station;
+
+        }
+
       }
-    });
+    );
 
     dataMode = "ready";
 
     updateStats();
 
     renderTrains();
+
     renderStations();
 
-    populateStationDatalists();
     setupAutocomplete();
 
-    setDataStatus("READY", "ready");
+    setDataStatus(
+      "READY",
+      "ready"
+    );
 
     setDataMessage(
       `${stations.length.toLocaleString()} stations • ${trains.length.toLocaleString()} trains loaded`,
@@ -1413,11 +1927,18 @@ async function loadCurrentData() {
     );
 
   } catch (error) {
-    console.error("Rail-WAYS data loading failed:", error);
+
+    console.error(
+      "Rail-WAYS data loading failed:",
+      error
+    );
 
     dataMode = "error";
 
-    setDataStatus("ERROR", "error");
+    setDataStatus(
+      "ERROR",
+      "error"
+    );
 
     setDataMessage(
       "The railway database could not be loaded. Check the GitHub Pages deployment and try again.",
@@ -1427,13 +1948,18 @@ async function loadCurrentData() {
     if ($("trainResults")) {
       $("trainResults").innerHTML = `
         <div class="empty-state">
+
           <span class="empty-icon">!</span>
 
-          <h3>Railway database unavailable</h3>
+          <h3>
+            Railway database unavailable
+          </h3>
 
           <p>
-            The Layer 1 data files could not be loaded.
+            The Layer 1 data files could
+            not be loaded.
           </p>
+
         </div>
       `;
     }
@@ -1441,13 +1967,18 @@ async function loadCurrentData() {
     if ($("stationGrid")) {
       $("stationGrid").innerHTML = `
         <div class="empty-state">
+
           <span class="empty-icon">!</span>
 
-          <h3>Station database unavailable</h3>
+          <h3>
+            Station database unavailable
+          </h3>
 
           <p>
-            The Layer 1 station data could not be loaded.
+            The Layer 1 station data could
+            not be loaded.
           </p>
+
         </div>
       `;
     }
@@ -1484,56 +2015,87 @@ function setupEvents() {
   $("plannerForm")?.addEventListener(
     "submit",
     async (event) => {
+
       event.preventDefault();
+
       await runPlanner();
+
     }
   );
 
   $("quickSearch")?.addEventListener(
     "submit",
     async (event) => {
+
       event.preventDefault();
+
       await runQuickSearch();
+
     }
   );
 
   $("swapBtn")?.addEventListener(
     "click",
     () => {
-      const from = $("fromInput");
-      const to = $("toInput");
 
-      if (!from || !to) return;
+      const from =
+        $("fromInput");
 
-      const temp = from.value;
+      const to =
+        $("toInput");
 
-      from.value = to.value;
-      to.value = temp;
+      if (!from || !to) {
+        return;
+      }
+
+      const temp =
+        from.value;
+
+      from.value =
+        to.value;
+
+      to.value =
+        temp;
+
     }
   );
 
   document
-    .querySelectorAll("[data-close]")
-    .forEach((element) => {
-      element.addEventListener(
-        "click",
-        closeModal
-      );
-    });
+    .querySelectorAll(
+      "[data-close]"
+    )
+    .forEach(
+      (element) => {
+
+        element.addEventListener(
+          "click",
+          closeModal
+        );
+
+      }
+    );
 
   document.addEventListener(
     "keydown",
     (event) => {
-      if (event.key === "Escape") {
+
+      if (
+        event.key === "Escape"
+      ) {
         closeModal();
       }
+
     }
   );
 
   $("menuBtn")?.addEventListener(
     "click",
     () => {
-      $("nav")?.classList.toggle("open");
+
+      $("nav")?.classList.toggle(
+        "open"
+      );
+
     }
   );
 }
@@ -1544,5 +2106,7 @@ function setupEvents() {
    ========================================================= */
 
 setDateDefaults();
+
 setupEvents();
+
 loadCurrentData();
