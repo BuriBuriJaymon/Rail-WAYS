@@ -1,7 +1,5 @@
-# Rail-WAYS Layer 1 data schema
-
-## Station
-
+Rail-WAYS Layer 1 data schema
+Station
 ```text
 code
 name
@@ -12,9 +10,7 @@ address
 latitude
 longitude
 ```
-
-## Train
-
+Train
 ```text
 number
 name
@@ -34,11 +30,8 @@ classes
 runsDays
 stopsCount
 ```
-
-`runsDays` is intentionally nullable because the selected CC0 DataMeet source does not provide a reliable weekly running-days field.
-
-## Schedule row
-
+`runsDays` contains weekly running days when represented by the Neo2308 GTFS calendar. It remains nullable when the upstream feed does not provide a usable service calendar.
+Schedule row
 ```text
 seq
 code
@@ -49,5 +42,4 @@ dep
 halt
 distance
 ```
-
-The DataMeet schedule source supplies arrival/departure/day/station information. `halt` and per-stop distance remain null when the source does not supply them.
+The Neo2308 GTFS stop_times feed supplies arrival/departure/station sequence. Rail-WAYS derives service day offsets from GTFS times and uses source distance when present; otherwise it may estimate cumulative geographic distance from station coordinates.
