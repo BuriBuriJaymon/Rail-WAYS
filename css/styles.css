@@ -163,3 +163,7 @@ footer p{margin:6px 0;color:#aeb8c0;font-size:12px}
 .loading-box{padding:30px 0}
 @media(max-width:760px){.detail-grid{grid-template-columns:1fr 1fr}}
 @media(max-width:520px){.detail-grid{grid-template-columns:1fr}}
+.planner-note{display:flex;flex-direction:column;gap:3px;padding:11px 13px;border:1px dashed #cfd6dc;border-radius:10px;background:#f8fafb;font-size:11px;color:var(--muted)}
+.planner-note b{color:var(--text);font-size:12px}
+.table-wrap{overflow:auto;max-width:100%}.table-wrap .timetable{min-width:650px}
+.station-card{cursor:default}.data-message.info{border-color:var(--line);color:var(--muted)}
