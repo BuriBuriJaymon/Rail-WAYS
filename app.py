@@ -36,9 +36,10 @@ st.markdown("""
         background-color: #333333 !important;
         color: #ffffff !important;
     }
-    /* Travel Date input text set to white */
+    /* Force Travel Date and text input text to white */
     div[data-baseweb="input"] input {
         color: #ffffff !important;
+        -webkit-text-fill-color: #ffffff !important;
     }
     table {
         color: #000000 !important;
