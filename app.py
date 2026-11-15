@@ -9,41 +9,16 @@ st.set_page_config(
     layout="wide"
 )
 
-# Custom CSS for Off-White Theme, White Button/Date Text
+# Custom CSS for clean contrast and legible multi-select pills
 st.markdown("""
 <style>
-    .stApp {
-        background-color: #fdfbf7;
-        color: #000000;
+    /* Fix multi-select pills / tags background and text color */
+    div[data-baseweb="tag"] {
+        background-color: #e0dcd5 !important;
     }
-    section[data-testid="stSidebar"] {
-        background-color: #f4efea;
-    }
-    h1, h2, h3, h4, h5, h6, p, span, label, div {
+    div[data-baseweb="tag"] span, div[data-baseweb="tag"] div, div[data-baseweb="tag"] p {
         color: #000000 !important;
-    }
-    /* Button styling: dark background with white text */
-    .stButton>button {
-        background-color: #111111 !important;
-        color: #ffffff !important;
-        border-radius: 4px;
-        font-weight: bold;
-    }
-    .stButton>button p {
-        color: #ffffff !important;
-    }
-    .stButton>button:hover {
-        background-color: #333333 !important;
-        color: #ffffff !important;
-    }
-    /* Force Travel Date and text input text to white */
-    div[data-baseweb="input"] input {
-        color: #ffffff !important;
-        -webkit-text-fill-color: #ffffff !important;
-    }
-    table {
-        color: #000000 !important;
-        background-color: #ffffff !important;
+        -webkit-text-fill-color: #000000 !important;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -62,7 +37,7 @@ selected_classes = st.sidebar.multiselect(
     "Class Preferences", 
     options=class_options, 
     default=['SL', '3A', '2A'], 
-    key="class_pref_clean_v6"
+    key="class_pref_clean_v8"
 )
 
 # Search Button
